@@ -1,7 +1,7 @@
 """S1 intent-77: Banking77 intent classification, 77-way routing.
 
-Real data. Source: the Banking77 dataset, PolyAI-LD task-specific
-datasets (https://github.com/PolyAI-LD/task-specific-datasets,
+Real data. Source: the Banking77 dataset, PolyAI-LDN task-specific
+datasets (https://github.com/PolyAI-LDN/task-specific-datasets,
 banking_data/train.csv). License: Creative Commons Attribution 4.0
 International (CC BY 4.0) - the repository's LICENSE file is saved to
 ``data/raw/banking77-LICENSE`` at build time and its hash recorded.
@@ -26,11 +26,11 @@ from .items import DMB_SEED, DecisionItem
 
 SUITE_ID = "s1-intent-77"
 DATA_URL = (
-    "https://raw.githubusercontent.com/PolyAI-LD/task-specific-datasets/"
+    "https://raw.githubusercontent.com/PolyAI-LDN/task-specific-datasets/"
     "master/banking_data/train.csv"
 )
 LICENSE_URL = (
-    "https://raw.githubusercontent.com/PolyAI-LD/task-specific-datasets/"
+    "https://raw.githubusercontent.com/PolyAI-LDN/task-specific-datasets/"
     "master/LICENSE"
 )
 N_TOTAL = 300
@@ -54,7 +54,7 @@ def download(raw_dir: Path) -> tuple[Path, list[str]]:
     labels: list[str] = []
     with csv_path.open(newline="", encoding="utf-8") as handle:
         for row in csv.DictReader(handle):
-            labels.append(row["label"])
+            labels.append(row["category"])
     return csv_path, sorted(set(labels))
 
 
@@ -68,7 +68,7 @@ def load_rows(path: Path) -> list[tuple[str, str]]:
             if not text or text in seen:
                 continue
             seen.add(text)
-            rows.append((text, row["label"]))
+            rows.append((text, row["category"]))
     return rows
 
 
