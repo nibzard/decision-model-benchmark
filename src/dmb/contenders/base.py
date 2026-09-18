@@ -35,11 +35,35 @@ class Decision(BaseModel):
 
 
 class ContenderError(Exception):
-    """Base class for contender failures. Never counted as a wrong answer."""
+    """Base class for contender failures. Never counted as a wrong answer.
+
+    When a provider response exists but the decision could not be parsed
+    or validated from it, adapters attach the reported usage and the
+    response so the runner can bill and record the attempt. The metadata
+    travels as attributes; credentials never appear here.
+    """
+
+    category: str = "unknown"
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.input_tokens: int | None = None
+        self.output_tokens: int | None = None
+        self.response: Any = None
+
+    def attach(self, input_tokens: int | None, output_tokens: int | None,
+               response: Any) -> None:
+        """Record the usage and response of the call that failed."""
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+        self.response = response
+        return
 
 
 class MalformedReply(ContenderError):
     """Reply failed the schema or bounds check."""
+
+    category = "schema"
 
     def __init__(self, message: str, raw: Any = None) -> None:
         super().__init__(message)
@@ -49,6 +73,8 @@ class MalformedReply(ContenderError):
 class RateLimited(ContenderError):
     """Provider returned a rate-limit or overload response."""
 
+    category = "transport"
+
 
 class ProviderRejected(ContenderError):
     """Provider refused a well-formed request (for example an option-count
@@ -56,13 +82,19 @@ class ProviderRejected(ContenderError):
     cap). A measured outcome, not a client bug: the message ships in the
     raw log."""
 
+    category = "provider"
+
 
 class TransportError(ContenderError):
     """Network, timeout, or server error."""
 
+    category = "transport"
+
 
 class AuthError(ContenderError):
     """Authentication or permission failure. Not retryable."""
+
+    category = "auth"
 
 
 class Contender:
@@ -87,6 +119,16 @@ class Contender:
 
     def _decide(self, state: str, options: list[str]) -> Decision:
         raise NotImplementedError
+
+    def negotiate(self) -> dict[str, int] | None:
+        """Probe the provider once before scoring; return reported usage.
+
+        The base implementation is a no-op for local contenders. Network
+        contenders override it: the probe call consumes tokens, so the
+        runner bills the returned usage as negotiation spend, kept separate
+        from scored decisions.
+        """
+        return None
 
     def close(self) -> None:  # noqa: B027 - optional cleanup
         """Release resources. Default: nothing."""

@@ -26,7 +26,8 @@ def macro_f1(preds: Sequence[int], golds: Sequence[int], num_classes: int) -> fl
 
     Classes absent from both ``preds`` and ``golds`` score 0 and still count
     in the average, so the value only compares contenders run on the same
-    suite.
+    suite. Option positions are not classes when options move between
+    items; use :func:`macro_f1_labeled` for that case.
     """
     if num_classes <= 0:
         raise ValueError("num_classes must be positive")
@@ -34,6 +35,37 @@ def macro_f1(preds: Sequence[int], golds: Sequence[int], num_classes: int) -> fl
         raise ValueError("preds and golds must have equal length")
     f1s: list[float] = []
     for c in range(num_classes):
+        tp = sum(1 for p, g in zip(preds, golds, strict=True) if p == c and g == c)
+        fp = sum(1 for p, g in zip(preds, golds, strict=True) if p == c and g != c)
+        fn = sum(1 for p, g in zip(preds, golds, strict=True) if p != c and g == c)
+        denom = 2 * tp + fp + fn
+        f1s.append((2 * tp / denom) if denom else 0.0)
+    return float(np.mean(f1s))
+
+
+def macro_f1_labeled(
+    preds: Sequence[str],
+    golds: Sequence[str],
+    classes: Sequence[str],
+) -> float:
+    """Macro-averaged F1 over stable class labels.
+
+    ``classes`` is the fixed class universe (for DMB: the option texts of
+    one frozen suite). Labels absent from both ``preds`` and ``golds``
+    score 0 and still count in the average. Permuting an item's options
+    cannot change the value, because the labels are the option texts, not
+    positions.
+    """
+    if not classes:
+        raise ValueError("classes must not be empty")
+    if len(preds) != len(golds):
+        raise ValueError("preds and golds must have equal length")
+    known = set(classes)
+    for label in [*preds, *golds]:
+        if label not in known:
+            raise ValueError(f"label {label!r} is not in the class universe")
+    f1s: list[float] = []
+    for c in classes:
         tp = sum(1 for p, g in zip(preds, golds, strict=True) if p == c and g == c)
         fp = sum(1 for p, g in zip(preds, golds, strict=True) if p == c and g != c)
         fn = sum(1 for p, g in zip(preds, golds, strict=True) if p != c and g == c)

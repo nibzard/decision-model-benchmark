@@ -35,7 +35,7 @@ model class, not the prompt.
 
 | Contender | Status |
 |---|---|
-| jev (TypeSafe AI) | No key yet (waitlist). Adapter ships behind the same interface; column stays empty until access opens. |
+| jev (TypeSafe AI) | Key obtained; run in v1.1. Native confidence field is provider-defined and labeled separately from the shared confidence definition. |
 
 ### B. Constrained LLMs
 
@@ -110,14 +110,23 @@ Per contender, per suite:
 
 | Metric | Definition |
 |---|---|
-| Accuracy / macro-F1 | Against gold (S3 maps through permutations). |
-| Malformed rate | Replies that fail schema or bounds after one retry. |
+| Accuracy | Valid decisions against gold. Malformed and failed decisions count in their own columns, never as wrong answers. |
+| Macro-F1 | Stable class labels (the option texts) on S1, S2, S4, whose items share one option list. Absent classes score 0. Not applicable on S3 and S5, where option texts vary between items; those cells say `n/a`. |
+| Malformed rate | Replies that fail schema or bounds after one retry. Denominator: completed decisions. |
+| Failed rate | Rate-limited, transport, provider-rejected, or authentication failures after the protocol retry. Denominator: completed decisions. |
+| Coverage | Completed decisions divided by expected decisions; valid decisions divided by expected decisions. Every cell lists status, stop reason, and source run. |
 | ECE | 10-bin expected calibration error over confidence. |
 | Brier | On the reported confidence for correctness. |
-| p50 / p95 / p99 latency | End-to-end client wall time, 3 repeats. |
-| Cost per 1,000 decisions | From provider usage fields, list prices pinned with date. |
-| Flip rate | S4 only: choice changes under option permutation. |
+| p50 / p95 / p99 latency | Scope named per cell: one request (protocol v1) or the whole decision including retry backoff (protocol v2). |
+| Cost per 1,000 decisions | From provider usage fields, list prices pinned with date. Covers every recorded attempt when the run kept attempt logs; unknown usage is marked unknown, never treated as a measured zero. |
+| Flip rate | S4 only: choice changes under option permutation, mapped through the permutation. |
 | Cardinality curve | S3 accuracy and latency versus N. |
+
+Confidence is defined for every contender as the probability that the
+chosen option is correct. Language-model contenders receive this
+definition in the prompt; jev's native confidence field is
+provider-defined and is not documented as that probability, so the report
+labels it separately.
 
 ## Protocol
 
@@ -128,17 +137,74 @@ Per contender, per suite:
 3. One retry on malformed LLM reply (recorded); a second failure counts as
    malformed, not wrong.
 4. Prices live in one table with the date they were checked. Cost is
-   computed from usage, never from estimates.
+   computed from usage, never from estimates. Each run stores a snapshot
+   of the table beside its manifest; reports reprice from that snapshot.
 5. Every run writes `runs/<id>/manifest.json`: contender versions, item-file
    hashes, price table hash, library versions, wall time, total spend.
+   The manifest is replaced atomically and starts in status `running`.
 6. Raw responses are kept in the run directory and published with the
    report. No cherry-picking; the report is generated, not written.
+7. A run directory is created exclusively. An existing `runs/<id>` refuses
+   a second run with the same ID; nothing is resumed or overwritten.
+8. Stop scopes: a run stop (budget exhaustion, execution failure) halts
+   every lane; a provider stop (authentication failure) halts that
+   provider's lane; a cell stop (suite wall deadline) ends that cell.
+   A stopped cell cancels queued work, then collects and persists every
+   request already running. Later cells in a stopped lane are recorded as
+   skipped with their expected row counts.
+9. Every attempt - first tries, retries, malformed replies, and failures -
+   is recorded with its own timing, reported usage, and response in
+   `raw/<contender>.<suite>.attempts.jsonl`.
+10. Negotiation probe calls are billed separately from scored decisions
+    and reported as negotiation spend. Contenders not selected on the
+    command line are never constructed or probed.
+11. The majority baseline's priors come from fixed source suites
+    (`PRIOR_SOURCES` in `baselines.py`): S4 uses the S1 prior so the
+    order experiment holds the prior fixed. The manifest records each
+    prior's source suite, option, value, and source file hash.
+
+Run exit codes: `0` complete; `2` usage error (bad run ID, existing run
+directory, no contenders); `3` execution failure; `4` budget stop; `5`
+authentication stop; `6` deadline stop.
+
+## Report merging
+
+A report renders from one or more run directories. Before anything is
+combined, the report verifies every run: item-file hashes must match each
+run's manifest, two runs recording different hashes for one suite are
+rejected, and every row is validated against the frozen items. Protocol
+versions, latency scopes, and prompt hashes must agree; mixing versions
+requires `--allow-protocol-mix`, and the report then records the mix and
+its policy. Later runs replace earlier cells whole - a later failed cell
+replaces an earlier success instead of falling back to it - and every
+coverage row names its source run.
+
+## Protocol history
+
+- **v1** (runs `v1`, `v1.1`): one latency number per request; per-attempt
+  usage and retry latency not recorded; macro-F1 over option positions;
+  majority prior table built from whatever suites loaded; cost from
+  final-attempt usage only.
+- **v2** (this code, run `v2-majority-fix` and later): attempt records
+  with per-attempt usage and timing; decision-scope latency including
+  retry backoff; macro-F1 over stable option labels with `n/a` where
+  positions are not classes; pinned `PRIOR_SOURCES` with recorded
+  provenance; exclusive run directories; stop scopes with draining;
+  negotiated-usage billing; price snapshots per run; prompt and
+  confidence-definition fingerprints in the manifest. The v2 corrections
+  and their defect mapping are published as `results/v2/CORRECTIONS.md`.
 
 ## Report
 
 - `results/vN.md` and a static `results/vN.html`: one table per metric,
-   one cardinality plot, one reliability diagram per contender.
-- Raw run directories attached as an archive.
+   one coverage table, one cardinality plot, one reliability diagram per
+   contender. Machine-readable cell metrics sit beside them in
+   `results/vN.cells.json`.
+- Raw run directories attached as an archive. S2 item text is scrubbed
+   from every archived file whose name carries the suite - decision logs
+   and attempt logs alike.
+- Corrections publish as a new version with a correction note mapping
+   each changed number to its defect; earlier versions stay untouched.
 - Published on nibzard.com with the raw data. The headline number is never a
   single speedup; it is the per-suite table.
 

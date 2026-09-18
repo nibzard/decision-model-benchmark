@@ -6,8 +6,9 @@ documentation.
 
 import pytest
 
-from dmb.contenders.base import MalformedReply
+from dmb.contenders.base import MalformedReply, TransportError
 from dmb.contenders.jsonmode import (
+    JSONModeContender,
     anthropic_usage,
     extract_json_object,
     jev_usage,
@@ -86,6 +87,52 @@ class TestUsageExtraction:
     def test_validate_dict_rejects_bool(self):
         with pytest.raises(MalformedReply):
             validate_decision_dict({"choice_index": 1, "confidence": True}, 3)
+
+
+class TestNegotiationAndBilling:
+    """Finding 2: probe usage is reported; failed parses still bill."""
+
+    def _contender(self) -> JSONModeContender:
+        return JSONModeContender("probe:test", "test-model", "http://invalid", {})
+
+    def test_negotiate_returns_probe_usage(self):
+        contender = self._contender()
+        contender._post = lambda body: {
+            "choices": [{"message": {"content": '{"choice_index": 1, "confidence": 1.0}'}}],
+            "usage": {"prompt_tokens": 42, "completion_tokens": 7},
+        }
+        assert contender.negotiate() == {"input_tokens": 42, "output_tokens": 7}
+
+    def test_negotiate_without_usage_reports_none(self):
+        contender = self._contender()
+        contender._post = lambda body: {
+            "choices": [{"message": {"content": '{"choice_index": 0, "confidence": 1.0}'}}],
+            "usage": {},
+        }
+        assert contender.negotiate() is None
+
+    def test_negotiate_failure_returns_none_with_note(self):
+        contender = self._contender()
+
+        def down(_body):
+            raise TransportError("connection refused")
+
+        contender._post = down
+        assert contender.negotiate() is None
+        assert any("negotiation probe failed" in note for note in contender.notes)
+
+    def test_malformed_reply_attaches_usage_and_response(self):
+        contender = self._contender()
+        response = {
+            "choices": [{"message": {"content": "no json object here"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+        }
+        contender._post = lambda body: response
+        with pytest.raises(MalformedReply) as excinfo:
+            contender._decide("state", ["a", "b"])
+        assert excinfo.value.input_tokens == 10
+        assert excinfo.value.output_tokens == 2
+        assert excinfo.value.response is response
 
 
 class TestAnthropicTextFallback:

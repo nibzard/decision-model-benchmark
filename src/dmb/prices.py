@@ -76,3 +76,27 @@ def prices_table_hash() -> str:
         [p.__dict__ for p in PRICES], sort_keys=True, indent=2
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def snapshot_payload() -> list[dict]:
+    """Serializable copy of the price table, stored beside each new run.
+
+    A stored snapshot lets a report reprice a run with the exact table the
+    run recorded, instead of silently repricing it with today's table.
+    """
+    return [dict(p.__dict__) for p in PRICES]
+
+
+def load_snapshot(payload: list[dict]) -> dict[str, Price]:
+    """Parse a stored price snapshot into ``{contender: Price}``."""
+    return {
+        entry["contender"]: Price(
+            contender=entry["contender"],
+            model=entry["model"],
+            input_per_mtok=float(entry["input_per_mtok"]),
+            output_per_mtok=float(entry["output_per_mtok"]),
+            checked_on=entry["checked_on"],
+            source=entry["source"],
+        )
+        for entry in payload
+    }

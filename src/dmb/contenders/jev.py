@@ -40,15 +40,17 @@ from .base import (
     TransportError,
 )
 from .jsonmode import jev_usage
-from .render import render_jev_state
+from .render import render_jev_instructions, render_jev_state
 
 TIMEOUT = httpx.Timeout(120.0, connect=15.0)
 API_URL = "https://api.typesafe.ai/v1/systemone"
 
-INSTRUCTIONS = (
-    "Choose the single best option for the decision state. If the state "
-    "does not determine the answer, pick the least unreasonable option."
-)
+# Shared semantic core with the language-model prompt (render.py): the
+# uncertainty requirement and the confidence definition cannot drift
+# between contender classes. The provider's documented answer field is
+# named "confidence"; the provider does not document it as a probability
+# of correctness, so manifests label it "provider-defined confidence".
+INSTRUCTIONS = render_jev_instructions()
 
 
 class JevContender(Contender):
@@ -70,13 +72,24 @@ class JevContender(Contender):
         )
         self.notes: list[str] = []
 
-    def negotiate(self) -> None:
-        """Probe with one cheap call; record the observed API surface."""
+    def negotiate(self) -> dict[str, int] | None:
+        """Probe with one cheap call; record the observed API surface.
+
+        Returns the probe's reported usage so the runner can bill the
+        negotiation call.
+        """
         try:
-            self._decide("Probe: which storage tier does the nightly backup use?",
-                         ["cold storage", "hot storage"])
+            decision = self._decide("Probe: which storage tier does the nightly backup use?",
+                                    ["cold storage", "hot storage"])
         except Exception as exc:  # noqa: BLE001 - negotiation must not crash setup
             self.notes.append(f"negotiation probe failed: {exc}")
+            return None
+        if decision.input_tokens is None and decision.output_tokens is None:
+            return None
+        return {
+            "input_tokens": decision.input_tokens,
+            "output_tokens": decision.output_tokens,
+        }
 
     def _decide(self, state: str, options: list[str]) -> Decision:
         criteria = {option: option for option in options}
@@ -96,19 +109,28 @@ class JevContender(Contender):
             answer = response["answers"]["decision"]
             choice_key = answer["choice"]
             confidence = answer.get("confidence")
+            if choice_key not in criteria:
+                raise MalformedReply(
+                    f"choice {choice_key!r} not among criteria keys", raw=response
+                )
+            if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+                raise MalformedReply(
+                    f"confidence missing or not a number: {confidence!r}", raw=response
+                )
+            confidence = float(confidence)
+            if not 0.0 <= confidence <= 1.0:
+                raise MalformedReply(
+                    f"confidence out of bounds: {confidence}", raw=response
+                )
+        except MalformedReply as exc:
+            # The HTTP call succeeded; bill and record its usage even though
+            # the reply never became a decision.
+            exc.attach(*jev_usage(response), response)
+            raise
         except (KeyError, TypeError) as exc:
-            raise MalformedReply(f"unexpected response shape: {exc}", raw=response) from exc
-        if choice_key not in criteria:
-            raise MalformedReply(
-                f"choice {choice_key!r} not among criteria keys", raw=response
-            )
-        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
-            raise MalformedReply(
-                f"confidence missing or not a number: {confidence!r}", raw=response
-            )
-        confidence = float(confidence)
-        if not 0.0 <= confidence <= 1.0:
-            raise MalformedReply(f"confidence out of bounds: {confidence}", raw=response)
+            malformed = MalformedReply(f"unexpected response shape: {exc}", raw=response)
+            malformed.attach(*jev_usage(response), response)
+            raise malformed from exc
         input_tokens, output_tokens = jev_usage(response)
         return Decision(
             choice_index=options.index(choice_key),

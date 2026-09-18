@@ -1,12 +1,21 @@
 """Render the published report from run directories.
 
-Everything here derives from the run directory plus the frozen, hashed
+Everything here derives from the run directories plus the frozen, hashed
 item files: tables, one cardinality plot, one reliability diagram per
 contender, and a raw archive. S2 state text is scrubbed from the archive
 (the SMS spam license does not cover republication of item text).
 
 The report is generated, never hand-edited; numbers recompute from
-``results.jsonl`` and the manifests.
+``results.jsonl`` and the manifests. Before aggregation, every supplied
+run is verified: item-file hashes must match, conflicting hashes for one
+suite are rejected, and rows are validated against the frozen items.
+Later runs replace earlier cells whole - a later failed cell replaces an
+earlier success instead of falling back to it.
+
+Macro-averaged F1 uses stable class labels (the option texts) on suites
+whose items share one option list (S1, S2, S4). S3 code words and S5
+alternatives vary between items, so option positions are not classes
+there and macro-F1 is not applicable.
 """
 
 from __future__ import annotations
@@ -21,8 +30,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .metrics import accuracy, brier, confidence_spread, ece, flip_rate, macro_f1
-from .prices import Price, price_for
+from .metrics import accuracy, brier, confidence_spread, ece, flip_rate, macro_f1_labeled
+from .prices import PRICES, Price, load_snapshot, prices_table_hash
 from .suites.build import SUITE_ORDER
 from .suites.items import DecisionItem, load_items, sha256_file
 
@@ -34,6 +43,27 @@ SUITE_TITLES: dict[str, str] = {
     "s5_confidence": "S5 confidence honesty",
 }
 
+# Suites whose option texts are stable classes across items.
+LABEL_SUITES = frozenset({"s1_intent77", "s2_spam", "s4_order"})
+
+# Protocol fields that must agree before runs can be combined. Missing
+# values fall back to the historical (v1) behavior.
+_PROTOCOL_KEYS = (
+    "protocol_version",
+    "repeats",
+    "temperature",
+    "malformed_retry",
+    "transport_retry",
+    "rate_limit_backoff",
+    "latency_scope",
+    "prompt_sha256",
+)
+_V1_DEFAULTS = {
+    "protocol_version": "v1",
+    "latency_scope": "request",
+    "prompt_sha256": None,
+}
+
 # Fields that may carry item text; scrubbed in the published archive.
 _REDACT_KEYS = {"content", "text", "thinking", "state", "detail", "error", "system", "input"}
 _REDACTED = "[redacted: s2 license]"
@@ -42,6 +72,10 @@ PALETTE = [
     "#2455e4", "#d42a2a", "#187a3b", "#a21caf", "#b45309", "#0e7490",
     "#5b21b6", "#991b1b", "#4d7c0f", "#be185d", "#374151", "#7c2d12",
 ]
+
+
+class MergeError(ValueError):
+    """Runs cannot be combined as supplied; the message says why."""
 
 
 def _fmt_pct(value: float | None) -> str:
@@ -86,23 +120,171 @@ def load_run(run_dir: Path) -> RunData:
     return RunData(run_id=run_dir.name, dir=run_dir, manifest=manifest, rows=rows)
 
 
-def load_items_verified(root: Path, manifest: dict) -> dict[str, dict[str, DecisionItem]]:
-    """Load the frozen item files, verifying each hash against the manifest.
+def _protocol_of(manifest: dict) -> dict:
+    protocol = dict(manifest.get("protocol", {}))
+    for key, default in _V1_DEFAULTS.items():
+        protocol.setdefault(key, default)
+    return protocol
 
-    Raises if an item file changed after the run: report numbers must
-    correspond to the exact items that were scored.
+
+def _prices_for_run(run: RunData) -> dict[str, Price]:
+    """Prices for one run: its stored snapshot, or the current table.
+
+    A run without a snapshot (protocol v1) must have recorded the current
+    table's hash; otherwise the current table would silently reprice an
+    old report.
+    """
+    snapshot = run.dir / "prices.snapshot.json"
+    if snapshot.exists():
+        return load_snapshot(json.loads(snapshot.read_text(encoding="utf-8")))
+    recorded = run.manifest.get("price_table_sha256")
+    current = prices_table_hash()
+    if recorded != current:
+        raise MergeError(
+            f"run {run.run_id} predates price snapshots and its recorded price "
+            f"table hash {str(recorded)[:12]} does not match the current table "
+            f"{current[:12]}; refusing to reprice it - pin the old table or "
+            "regenerate from a run with a stored snapshot"
+        )
+    return {p.contender: p for p in PRICES}
+
+
+def verify_runs(
+    runs: list[RunData],
+    root: Path,
+    allow_protocol_mix: bool = False,
+) -> dict[str, dict[str, DecisionItem]]:
+    """Verify every supplied run before anything is combined.
+
+    - Item-file hashes must match each run's manifest.
+    - Two runs recording different hashes for one suite are rejected.
+    - Every row's suite, item reference, gold label, and prediction bounds
+      are validated against the verified frozen items.
+    - Protocol versions, latency scopes, and prompt hashes must agree
+      unless ``allow_protocol_mix`` is set (the report then records the
+      mix visibly).
     """
     items_by_suite: dict[str, dict[str, DecisionItem]] = {}
-    for suite_id, expected_hash in manifest.get("item_files", {}).items():
-        path = root / "data" / "suites" / f"{suite_id}.jsonl"
-        actual = sha256_file(path)
-        if actual != expected_hash:
-            raise ValueError(
-                f"item file {path} hash {actual[:12]} != manifest {expected_hash[:12]}; "
-                "the frozen items changed after the run"
-            )
-        items_by_suite[suite_id] = {item.item_id: item for item in load_items(path)}
+    hashes_by_suite: dict[str, tuple[str, str]] = {}
+    for run in runs:
+        for suite_id, expected_hash in run.manifest.get("item_files", {}).items():
+            path = root / "data" / "suites" / f"{suite_id}.jsonl"
+            if not path.exists():
+                raise MergeError(
+                    f"run {run.run_id} references item file {path} which is missing"
+                )
+            actual = sha256_file(path)
+            if actual != expected_hash:
+                raise MergeError(
+                    f"run {run.run_id}: item file {path} hash {actual[:12]} != "
+                    f"manifest {expected_hash[:12]}; the frozen items changed "
+                    "after the run"
+                )
+            known = hashes_by_suite.get(suite_id)
+            if known is not None and known[0] != expected_hash:
+                raise MergeError(
+                    f"suite {suite_id} has conflicting item hashes: run "
+                    f"{known[1]} recorded {known[0][:12]}, run {run.run_id} "
+                    f"recorded {expected_hash[:12]}; the runs saw different "
+                    "items and cannot be combined"
+                )
+            hashes_by_suite[suite_id] = (expected_hash, run.run_id)
+            items_by_suite[suite_id] = {
+                item.item_id: item for item in load_items(path)
+            }
+
+    protocols = {run.run_id: _protocol_of(run.manifest) for run in runs}
+    reference_id = runs[0].run_id
+    reference = protocols[reference_id]
+    for run_id, protocol in protocols.items():
+        for key in _PROTOCOL_KEYS:
+            if protocol.get(key) != reference.get(key):
+                message = (
+                    f"runs {reference_id} and {run_id} disagree on protocol "
+                    f"{key} ({reference.get(key)!r} vs {protocol.get(key)!r}); "
+                    "their numbers do not share one execution or prompt "
+                    "definition"
+                )
+                if not allow_protocol_mix:
+                    raise MergeError(message + " (pass --allow-protocol-mix to "
+                                        "merge anyway with a recorded note)")
+                break  # one recorded note per run pair is enough
+
+    for run in runs:
+        for row in run.rows:
+            suite_id = row.get("suite")
+            items = items_by_suite.get(suite_id)
+            if items is None:
+                raise MergeError(
+                    f"run {run.run_id} row {row.get('item_id')!r} references "
+                    f"suite {suite_id!r} whose item file was not verified"
+                )
+            item = items.get(row.get("item_id"))
+            if item is None:
+                raise MergeError(
+                    f"run {run.run_id} row references unknown item "
+                    f"{row.get('item_id')!r} in suite {suite_id}"
+                )
+            if row.get("gold_index") != item.gold_index:
+                raise MergeError(
+                    f"run {run.run_id} row {item.item_id}: gold "
+                    f"{row.get('gold_index')} != frozen item gold "
+                    f"{item.gold_index}"
+                )
+            choice = row.get("choice_index")
+            if choice is not None and not 0 <= choice < len(item.options):
+                raise MergeError(
+                    f"run {run.run_id} row {item.item_id}: choice {choice} "
+                    f"out of range for {len(item.options)} options"
+                )
     return items_by_suite
+
+
+# ---- cell selection ---------------------------------------------------------
+
+
+@dataclass
+class SelectedCell:
+    """One contender-suite cell and the run that supplied it."""
+
+    run: RunData
+    manifest_cell: dict | None
+    rows: list[dict]
+
+
+def select_cells(runs: list[RunData]) -> dict[tuple[str, str], SelectedCell]:
+    """Pick the last supplied run for every cell; replace cells whole.
+
+    A cell belongs to a run when the run's manifest lists it or the run
+    has rows for it - so a later failed cell with zero rows still replaces
+    an earlier success instead of exposing the earlier score.
+    """
+    selection: dict[tuple[str, str], SelectedCell] = {}
+    for run in runs:
+        manifest_cells = {
+            (cell.get("contender"), cell.get("suite")): cell
+            for cell in run.manifest.get("cells", [])
+        }
+        rows_by_cell: dict[tuple[str, str], list[dict]] = {}
+        for row in run.rows:
+            rows_by_cell.setdefault(
+                (row.get("contender"), row.get("suite")), []
+            ).append(row)
+        for key in set(manifest_cells) | set(rows_by_cell):
+            rows = rows_by_cell.get(key, [])
+            seen: set[tuple[str, int]] = set()
+            for row in rows:
+                row_key = (row.get("item_id"), row.get("repeat"))
+                if row_key in seen:
+                    raise MergeError(
+                        f"run {run.run_id} cell {key[0]}/{key[1]} has duplicate "
+                        f"item-repeat {row_key}; cannot aggregate it"
+                    )
+                seen.add(row_key)
+            selection[key] = SelectedCell(
+                run=run, manifest_cell=manifest_cells.get(key), rows=rows
+            )
+    return selection
 
 
 # ---- aggregation -----------------------------------------------------------
@@ -114,17 +296,35 @@ class CellMetrics:
 
     contender: str
     suite: str
+    source_run: str | None = None
+    status: str = "ok"
+    stop_reason: str | None = None
     n_rows: int = 0
+    """Completed decisions."""
     n_items: int = 0
     n_ok: int = 0
+    """Valid decisions."""
     n_malformed: int = 0
     n_failed: int = 0
+    expected_decisions: int = 0
+    completion_coverage: float | None = None
+    """Completed decisions / expected decisions."""
+    valid_coverage: float | None = None
+    """Valid decisions / expected decisions."""
+    partial: bool = False
+    """The cell stopped early or returned invalid decisions."""
     accuracy: float | None = None
     macro_f1: float | None = None
+    macro_f1_applicable: bool = True
     ece: float | None = None
     brier: float | None = None
     latencies: dict[str, float] = field(default_factory=dict)
+    latency_scope: str = "request"
     cost_per_1000: float | None = None
+    cost_usd: float | None = None
+    cost_scope: str | None = None
+    """Which attempt charges the cost covers."""
+    cost_incomplete_reason: str | None = None
     # S4
     flip_rate: float | None = None
     conf_range: float | None = None
@@ -136,19 +336,31 @@ class CellMetrics:
         return {
             "contender": self.contender,
             "suite": self.suite,
+            "source_run": self.source_run,
+            "status": self.status,
+            "stop_reason": self.stop_reason,
             "n_rows": self.n_rows,
             "n_items": self.n_items,
             "n_ok": self.n_ok,
             "n_malformed": self.n_malformed,
             "n_failed": self.n_failed,
+            "expected_decisions": self.expected_decisions,
+            "completion_coverage": self.completion_coverage,
+            "valid_coverage": self.valid_coverage,
+            "partial": self.partial,
             "accuracy": self.accuracy,
             "macro_f1": self.macro_f1,
+            "macro_f1_applicable": self.macro_f1_applicable,
             "ece": self.ece,
             "brier": self.brier,
             "p50_ms": self.latencies.get("p50_ms"),
             "p95_ms": self.latencies.get("p95_ms"),
             "p99_ms": self.latencies.get("p99_ms"),
+            "latency_scope": self.latency_scope,
             "cost_per_1000_usd": self.cost_per_1000,
+            "cost_usd": self.cost_usd,
+            "cost_scope": self.cost_scope,
+            "cost_incomplete_reason": self.cost_incomplete_reason,
             "flip_rate": self.flip_rate,
             "mean_conf_range": self.conf_range,
             "admits_ignorance": self.admits_ignorance,
@@ -156,11 +368,31 @@ class CellMetrics:
         }
 
 
-def _price_or_none(contender: str) -> Price | None:
-    try:
-        return price_for(contender)
-    except KeyError:
-        return None
+def _attempt_costs(
+    run_dir: Path, contender: str, suite_id: str, price: Price
+) -> tuple[float, int, int]:
+    """Cost over every recorded attempt when the run kept attempt logs.
+
+    Returns ``(cost_usd, attempts_with_usage, attempts_without_usage)``.
+    A missing attempts file means no request ever started: a measured zero.
+    """
+    safe = contender.replace(":", "__")
+    path = run_dir / "raw" / f"{safe}.{suite_id}.attempts.jsonl"
+    if not path.exists():
+        return 0.0, 0, 0
+    cost = 0.0
+    known = unknown = 0
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        in_tok, out_tok = record.get("input_tokens"), record.get("output_tokens")
+        if in_tok is None or out_tok is None:
+            unknown += 1
+            continue
+        cost += price.cost_usd(in_tok, out_tok)
+        known += 1
+    return cost, known, unknown
 
 
 def aggregate_cell(
@@ -168,20 +400,50 @@ def aggregate_cell(
     suite_id: str,
     rows: list[dict],
     items: dict[str, DecisionItem],
+    *,
+    manifest_cell: dict | None = None,
+    source_run: str | None = None,
+    prices: dict[str, Price] | None = None,
+    latency_scope: str = "request",
+    selected: SelectedCell | None = None,
 ) -> CellMetrics:
     """Compute every metric for one contender-suite cell.
 
     Accuracy, macro-F1, ECE, and Brier run over valid decisions on items
     with a gold label (gold >= 0). Malformed and failed attempts count in
     their own columns, never as wrong answers. Latency percentiles run
-    over valid rows. Cost covers every attempt that reported usage.
+    over valid rows; ``latency_scope`` states whether one number covers
+    one request (protocol v1) or the complete decision including retry
+    backoff (protocol v2). Cost covers every recorded attempt when the
+    run kept attempt logs, and states its scope.
     """
-    cell = CellMetrics(contender=contender, suite=suite_id)
+    cell = CellMetrics(
+        contender=contender,
+        suite=suite_id,
+        source_run=source_run,
+        latency_scope=latency_scope,
+    )
     cell.n_rows = len(rows)
     cell.n_items = len({r["item_id"] for r in rows})
     cell.n_ok = sum(1 for r in rows if r["ok"])
     cell.n_malformed = sum(1 for r in rows if r["malformed"])
     cell.n_failed = sum(1 for r in rows if not r["ok"] and not r["malformed"])
+
+    if manifest_cell is not None:
+        cell.status = manifest_cell.get("status", "ok")
+        cell.stop_reason = manifest_cell.get("abort_reason")
+        cell.expected_decisions = int(manifest_cell.get("expected_rows") or 0)
+    if not cell.expected_decisions:
+        repeats = max(1, len({r["repeat"] for r in rows}) or 1)
+        cell.expected_decisions = len(items) * repeats if items else cell.n_rows
+    if cell.expected_decisions:
+        cell.completion_coverage = cell.n_rows / cell.expected_decisions
+        cell.valid_coverage = cell.n_ok / cell.expected_decisions
+    cell.partial = (
+        cell.status not in ("ok", None)
+        or cell.n_rows < cell.expected_decisions
+        or cell.n_malformed + cell.n_failed > 0
+    )
 
     scored = [r for r in rows if r["ok"] and r["gold_index"] >= 0]
     if scored:
@@ -190,12 +452,20 @@ def aggregate_cell(
         confs = [r["confidence"] for r in scored]
         corrects = [r["correct"] for r in scored]
         cell.accuracy = accuracy(preds, golds)
-        num_classes = 1 + max(item.gold_index for item in items.values()
-                              if item.gold_index >= 0) if items else 0
-        if num_classes:
-            cell.macro_f1 = macro_f1(preds, golds, num_classes)
+        if suite_id in LABEL_SUITES and items:
+            pred_labels = [
+                items[r["item_id"]].options[r["choice_index"]] for r in scored
+            ]
+            gold_labels = [
+                items[r["item_id"]].options[r["gold_index"]] for r in scored
+            ]
+            classes = sorted({o for item in items.values() for o in item.options})
+            cell.macro_f1 = macro_f1_labeled(pred_labels, gold_labels, classes)
         cell.ece = ece(confs, corrects)
         cell.brier = brier(confs, corrects)
+    if suite_id not in LABEL_SUITES:
+        cell.macro_f1_applicable = False
+        cell.macro_f1 = None
 
     ok_rows = [r for r in rows if r["ok"]]
     if ok_rows:
@@ -205,12 +475,51 @@ def aggregate_cell(
             "p99_ms": _percentile([r["latency_ms"] for r in ok_rows], 99),
         }
 
-    price = _price_or_none(contender)
-    if price:
-        total = sum(
-            price.cost_usd(r["input_tokens"] or 0, r["output_tokens"] or 0) for r in rows
-        )
-        cell.cost_per_1000 = total / len(rows) * 1000 if rows else None
+    price = (prices or {}).get(contender)
+    if price is not None:
+        if price.input_per_mtok == 0.0 and price.output_per_mtok == 0.0:
+            # Free by construction (deterministic baselines): a measured
+            # zero, not an unknown.
+            cell.cost_usd = 0.0
+            cell.cost_per_1000 = 0.0
+            cell.cost_scope = "no billable calls"
+        elif selected is not None and (
+            selected.run.dir / "raw" / f"{contender.replace(':', '__')}.{suite_id}.attempts.jsonl"
+        ).exists():
+            cost, known, unknown = _attempt_costs(
+                selected.run.dir, contender, suite_id, price
+            )
+            cell.cost_usd = cost
+            cell.cost_per_1000 = cost / cell.n_rows * 1000 if cell.n_rows else None
+            cell.cost_scope = "every recorded attempt of this cell"
+            if unknown:
+                cell.cost_incomplete_reason = (
+                    f"{unknown} attempts reported no usage; their charge is unknown"
+                )
+        else:
+            with_usage = [
+                r for r in rows
+                if r.get("input_tokens") is not None
+                and r.get("output_tokens") is not None
+            ]
+            unknown = cell.n_rows - len(with_usage)
+            retried = sum(1 for r in rows if r.get("retries"))
+            total = sum(
+                price.cost_usd(r["input_tokens"], r["output_tokens"])
+                for r in with_usage
+            )
+            cell.cost_usd = total
+            cell.cost_per_1000 = total / cell.n_rows * 1000 if cell.n_rows else None
+            cell.cost_scope = "final-attempt usage of completed decisions"
+            if retried:
+                cell.cost_incomplete_reason = (
+                    f"{retried} decisions retried; the discarded first attempts' "
+                    "usage was not recorded, so cost is a lower bound"
+                )
+            elif unknown:
+                cell.cost_incomplete_reason = (
+                    f"{unknown} decisions reported no usage; their charge is unknown"
+                )
 
     # S4: choices mapped through each permutation, grouped by base item.
     if suite_id == "s4_order":
@@ -241,26 +550,6 @@ def aggregate_cell(
 
 def _percentile(values: list[float], q: float) -> float:
     return float(np.percentile(np.asarray(values, dtype=float), q))
-
-
-def aggregate_all(
-    runs: list[RunData],
-    items_by_suite: dict[str, dict[str, DecisionItem]],
-) -> dict[tuple[str, str], CellMetrics]:
-    """Aggregate every contender-suite cell across the merged runs.
-
-    Later runs (the ``--extra`` jev run) win for a cell they contain.
-    """
-    rows_by_cell: dict[tuple[str, str], list[dict]] = {}
-    for run in runs:  # later runs override earlier ones per cell
-        for row in run.rows:
-            rows_by_cell.setdefault((row["contender"], row["suite"]), []).append(row)
-    cells: dict[tuple[str, str], CellMetrics] = {}
-    for (contender, suite_id), rows in rows_by_cell.items():
-        cells[(contender, suite_id)] = aggregate_cell(
-            contender, suite_id, rows, items_by_suite.get(suite_id, {})
-        )
-    return cells
 
 
 def contender_order(cells: dict[tuple[str, str], CellMetrics]) -> list[str]:
@@ -443,7 +732,11 @@ def _scrub(value, depth: int = 0) -> object:
 
 
 def archive_runs(run_dirs: list[Path], out_path: Path, redact_suite: str = "s2_spam") -> Path:
-    """Pack run directories into a tar.gz, scrubbing the licensed suite."""
+    """Pack run directories into a tar.gz, scrubbing the licensed suite.
+
+    Every ``.jsonl`` file whose name carries the licensed suite id is
+    scrubbed - decision logs and attempt logs alike.
+    """
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with tarfile.open(out_path, "w:gz") as tar:
         for run_dir in run_dirs:
@@ -485,6 +778,168 @@ def _html_table(header: list[str], rows: list[list[str]]) -> str:
 
 
 @dataclass
+class TableSpec:
+    """One metric table: title, metric key, format, and suite scope."""
+
+    title: str
+    key: str
+    fmt: object
+    suites: frozenset[str] | None = None
+    """Suites the metric applies to; None means every suite."""
+    out_of_scope: str = ""
+    """Cell text for suites outside ``suites`` ("" or "n/a")."""
+    star_partial: bool = False
+    """Append the partial-coverage star to values."""
+
+
+_COMPUTED_KEYS = {"_malformed_rate", "_failed_rate"}
+
+#: Keys every table spec must draw from: the one metric representation
+#: (``CellMetrics.as_dict``) plus the two computed rates.
+KNOWN_METRIC_KEYS = (
+    set(CellMetrics(contender="", suite="").as_dict()) | _COMPUTED_KEYS
+)
+
+
+def _table_specs() -> list[TableSpec]:
+    pct = _fmt_pct
+    return [
+        TableSpec(
+            "Accuracy (percent, valid rows, gold items)",
+            "accuracy", pct, star_partial=True,
+        ),
+        TableSpec(
+            "Macro-F1 (stable option labels; absent classes count as 0)",
+            "macro_f1", _fmt_f, suites=LABEL_SUITES, out_of_scope="n/a",
+            star_partial=True,
+        ),
+        TableSpec("ECE (10 equal-width bins)", "ece", _fmt_f),
+        TableSpec("Brier score", "brier", _fmt_f),
+        TableSpec(
+            "Malformed rate (percent of completed decisions)",
+            "_malformed_rate", pct,
+        ),
+        TableSpec(
+            "Failed attempts (rate, percent of completed decisions)",
+            "_failed_rate", pct,
+        ),
+        TableSpec("Latency p50 (ms)", "p50_ms", _fmt_ms),
+        TableSpec("Latency p95 (ms)", "p95_ms", _fmt_ms),
+        TableSpec("Latency p99 (ms)", "p99_ms", _fmt_ms),
+        TableSpec(
+            "Cost per 1,000 requested decisions (USD)",
+            "cost_per_1000_usd", _fmt_usd,
+        ),
+        TableSpec(
+            "S4 flip rate (percent of base items)",
+            "flip_rate", pct, suites=frozenset({"s4_order"}),
+        ),
+        TableSpec(
+            "S4 mean confidence range across permutations",
+            "mean_conf_range", _fmt_f, suites=frozenset({"s4_order"}),
+        ),
+        TableSpec(
+            "S5 admits-ignorance rate (confidence <= 0.5 on no-good items, percent)",
+            "admits_ignorance", pct, suites=frozenset({"s5_confidence"}),
+        ),
+        TableSpec(
+            "S5 mean confidence on no-good items",
+            "mean_conf_no_good", _fmt_f, suites=frozenset({"s5_confidence"}),
+        ),
+    ]
+
+
+def validate_table_specs() -> None:
+    """Every configured metric key must exist in the one representation."""
+    for spec in _table_specs():
+        if spec.key not in KNOWN_METRIC_KEYS:
+            raise KeyError(
+                f"table spec {spec.title!r} uses unknown metric key {spec.key!r}"
+            )
+
+
+def _cell_value(cell: CellMetrics, key: str) -> object:
+    """One lookup path: the cell's ``as_dict`` representation."""
+    if key == "_malformed_rate":
+        return cell.n_malformed / cell.n_rows if cell.n_rows else None
+    if key == "_failed_rate":
+        return cell.n_failed / cell.n_rows if cell.n_rows else None
+    return cell.as_dict()[key]
+
+
+def _metric_tables(model: ReportModel) -> list[tuple[str, list[str], list[list[str]]]]:
+    """One table per metric: (title, header, rows), from validated specs."""
+    tables: list[tuple[str, list[str], list[list[str]]]] = []
+    for spec in _table_specs():
+        rows = []
+        for contender in model.contenders:
+            row = [contender]
+            for suite in model.suites:
+                cell = model.cells.get((contender, suite))
+                if cell is None:
+                    row.append("-")
+                    continue
+                if spec.suites is not None and suite not in spec.suites:
+                    row.append(spec.out_of_scope)
+                    continue
+                value = spec.fmt(_cell_value(cell, spec.key))
+                if spec.key == "macro_f1" and not cell.macro_f1_applicable:
+                    value = "n/a"
+                if spec.star_partial and cell.partial and value not in ("-", "n/a"):
+                    value += "*"  # partial coverage: see the coverage table
+                if spec.key == "cost_per_1000_usd" and (
+                    cell.cost_incomplete_reason and value != "-"
+                ):
+                    value += "†"  # cost is a lower bound or partial
+                row.append(value)
+            rows.append(row)
+        header = ["contender"] + [SUITE_TITLES.get(s, s) for s in model.suites]
+        title = spec.title
+        if spec.star_partial:
+            title += " (*: partial coverage; see the coverage table)"
+        if spec.key == "cost_per_1000_usd":
+            title += " (†: incomplete usage; see the coverage table)"
+        if spec.key == "macro_f1":
+            title += (
+                ". Not applicable on S3 and S5: their option texts vary "
+                "between items, so positions are not classes"
+            )
+        tables.append((title, header, rows))
+    return tables
+
+
+def _coverage_rows(model: ReportModel) -> list[list[str]]:
+    rows = []
+    for contender in model.contenders:
+        for suite in model.suites:
+            cell = model.cells.get((contender, suite))
+            if cell is None:
+                continue
+            rows.append([
+                contender,
+                SUITE_TITLES.get(suite, suite),
+                cell.status,
+                str(cell.expected_decisions),
+                str(cell.n_rows),
+                str(cell.n_ok),
+                str(cell.n_malformed),
+                str(cell.n_failed),
+                _fmt_pct(cell.completion_coverage),
+                _fmt_pct(cell.valid_coverage),
+                cell.stop_reason or "",
+                cell.source_run or "",
+            ])
+    return rows
+
+
+_COVERAGE_HEADER = [
+    "contender", "suite", "status", "expected", "completed", "valid",
+    "malformed", "failed", "completion %", "valid %", "stop reason",
+    "source run",
+]
+
+
+@dataclass
 class ReportModel:
     """Everything the renderers need, computed once."""
 
@@ -495,35 +950,74 @@ class ReportModel:
     cardinality: dict[str, dict[int, dict[str, float]]]
     reliability: dict[str, list[dict]]
     spend_usd: float
+    selected_spend_usd: float
     deviations: list[str]
     notes: list[str]
     skipped: list[dict]
+    protocol_notes: list[str]
+    latency_scope: str
+    correction_note: str | None = None
 
     def json_summary(self) -> dict:
         return {
             "runs": [r.run_id for r in self.runs],
             "spend_usd": self.spend_usd,
+            "selected_cells_spend_usd": round(self.selected_spend_usd, 4),
+            "latency_scope": self.latency_scope,
             "cells": [c.as_dict() for c in self.cells.values()],
         }
 
 
-def build_report_model(runs: list[RunData], root: Path) -> ReportModel:
-    """Aggregate runs into the report model."""
-    items_by_suite = load_items_verified(root, runs[0].manifest)
-    cells = aggregate_all(runs, items_by_suite)
+def build_report_model(
+    runs: list[RunData],
+    root: Path,
+    allow_protocol_mix: bool = False,
+) -> ReportModel:
+    """Aggregate runs into the report model.
+
+    Runs are deduplicated first (the same directory supplied twice is
+    counted once), every run is verified, and later runs replace earlier
+    cells whole. Tables, plots, and machine-readable output all draw from
+    the same selected cells.
+    """
+    deduped: dict[Path, RunData] = {}
+    for run in runs:
+        deduped[run.dir.resolve()] = run
+    runs = list(deduped.values())
+
+    items_by_suite = verify_runs(runs, root, allow_protocol_mix=allow_protocol_mix)
+    selection = select_cells(runs)
+
+    prices_by_run = {run.run_id: _prices_for_run(run) for run in runs}
+    cells: dict[tuple[str, str], CellMetrics] = {}
+    for (contender, suite_id), selected in selection.items():
+        run = selected.run
+        cells[(contender, suite_id)] = aggregate_cell(
+            contender,
+            suite_id,
+            selected.rows,
+            items_by_suite.get(suite_id, {}),
+            manifest_cell=selected.manifest_cell,
+            source_run=run.run_id,
+            prices=prices_by_run.get(run.run_id, {}),
+            latency_scope=_protocol_of(run.manifest).get("latency_scope", "request"),
+            selected=selected,
+        )
     contenders = contender_order(cells)
 
+    # Plots draw from the selected cells, like every table: a replaced
+    # cell must not re-enter through a plot.
     cardinality: dict[str, dict[int, dict[str, float]]] = {}
+    items = items_by_suite.get("s3_cardinality", {})
+    s3_rows: dict[str, list[dict]] = {}
     for contender in contenders:
-        rows = [
-            r for run in runs for r in run.rows
-            if r["contender"] == contender and r["suite"] == "s3_cardinality"
-        ]
+        selected = selection.get((contender, "s3_cardinality"))
+        s3_rows[contender] = selected.rows if selected is not None else []
+    for contender in contenders:
         by_n: dict[int, dict[str, float]] = {}
-        items = items_by_suite.get("s3_cardinality", {})
         for n in sorted({i.meta["N"] for i in items.values()}):
             ids = {i.item_id for i in items.values() if i.meta["N"] == n}
-            n_rows = [r for r in rows if r["item_id"] in ids]
+            n_rows = [r for r in s3_rows[contender] if r["item_id"] in ids]
             cell = aggregate_cell(contender, "s3_cardinality", n_rows, items)
             if cell.n_rows:
                 by_n[n] = {
@@ -534,16 +1028,20 @@ def build_report_model(runs: list[RunData], root: Path) -> ReportModel:
         if by_n:
             cardinality[contender] = by_n
 
-    reliability = {
-        contender: reliability_bins(
-            [r for run in runs for r in run.rows if r["contender"] == contender]
-        )
-        for contender in contenders
-    }
+    reliability = {}
+    for contender in contenders:
+        pooled = [
+            r
+            for key, selected in selection.items()
+            if key[0] == contender
+            for r in selected.rows
+        ]
+        reliability[contender] = reliability_bins(pooled)
 
     deviations: list[str] = []
     notes: list[str] = []
     skipped: list[dict] = []
+    protocol_notes: list[str] = []
     spend = 0.0
     for run in runs:
         deviations.extend(run.manifest.get("deviations", []))
@@ -553,6 +1051,39 @@ def build_report_model(runs: list[RunData], root: Path) -> ReportModel:
                 notes.append(f"[{run.run_id}] {contender['name']}: {note}")
         skipped.extend(run.manifest.get("skipped", []))
         spend += run.manifest.get("spend_usd", 0.0)
+
+    if allow_protocol_mix:
+        versions = sorted({
+            _protocol_of(run.manifest).get("protocol_version", "v1")
+            for run in runs
+        })
+        protocol_notes.append(
+            "Mixed protocol versions merged by explicit policy: "
+            + ", ".join(versions)
+            + ". Replacement cells from different versions may differ in "
+            "latency scope, prompt text, and record format; the per-cell "
+            "source run column says which version each cell came from."
+        )
+    unknown_costs = [
+        c for c in cells.values() if c.cost_incomplete_reason
+    ]
+    if unknown_costs:
+        protocol_notes.append(
+            "Cost caveats: some cells report incomplete usage. Unknown usage "
+            "is not a measured zero; see the cost table markers and the "
+            "coverage table."
+        )
+
+    latency_scopes = {
+        _protocol_of(run.manifest).get("latency_scope", "request") for run in runs
+    }
+    latency_scope = (
+        "mixed" if len(latency_scopes) > 1 else next(iter(latency_scopes), "request")
+    )
+
+    selected_spend = sum(
+        c.cost_usd for c in cells.values() if c.cost_usd is not None
+    )
     return ReportModel(
         runs=runs,
         cells=cells,
@@ -561,66 +1092,29 @@ def build_report_model(runs: list[RunData], root: Path) -> ReportModel:
         cardinality=cardinality,
         reliability=reliability,
         spend_usd=spend,
+        selected_spend_usd=selected_spend,
         deviations=sorted(set(deviations)),
         notes=notes,
         skipped=skipped,
+        protocol_notes=protocol_notes,
+        latency_scope=latency_scope,
     )
 
 
-def _metric_tables(model: ReportModel) -> list[tuple[str, list[str], list[list[str]]]]:
-    """One table per metric: (title, header, rows)."""
-    pct = lambda v: _fmt_pct(v)  # noqa: E731
-    tables: list[tuple[str, list[str], list[list[str]]]] = []
-    specs = [
-        ("Accuracy (percent, valid rows, gold items)", "accuracy", pct),
-        ("Macro-F1 (absent classes count as 0)", "macro_f1", _fmt_f),
-        ("ECE (10 equal-width bins)", "ece", _fmt_f),
-        ("Brier score", "brier", _fmt_f),
-        ("Malformed rate (percent of rows)", "_malformed_rate", pct),
-        ("Failed attempts (rate, percent of rows)", "_failed_rate", pct),
-        ("Latency p50 (ms)", "p50_ms", _fmt_ms),
-        ("Latency p95 (ms)", "p95_ms", _fmt_ms),
-        ("Latency p99 (ms)", "p99_ms", _fmt_ms),
-        ("Cost per 1,000 requested decisions (USD)", "cost_per_1000_usd", _fmt_usd),
-        ("S4 flip rate (percent of base items)", "flip_rate", pct),
-        ("S4 mean confidence range across permutations", "mean_conf_range", _fmt_f),
-        ("S5 admits-ignorance rate (confidence <= 0.5 on no-good items, percent)",
-         "admits_ignorance", pct),
-        ("S5 mean confidence on no-good items", "mean_conf_no_good", _fmt_f),
-    ]
-    for title, key, fmt in specs:
-        rows = []
-        for contender in model.contenders:
-            row = [contender]
-            for suite in model.suites:
-                cell = model.cells.get((contender, suite))
-                if cell is None:
-                    row.append("-")
-                    continue
-                if key == "_malformed_rate":
-                    row.append(pct(cell.n_malformed / cell.n_rows if cell.n_rows else None))
-                elif key == "_failed_rate":
-                    row.append(pct(cell.n_failed / cell.n_rows if cell.n_rows else None))
-                elif key in ("p50_ms", "p95_ms", "p99_ms"):
-                    row.append(fmt(cell.latencies.get(key)))
-                elif key in ("flip_rate", "mean_conf_range") and suite != "s4_order" or (
-                    key in ("admits_ignorance", "mean_conf_no_good")
-                    and suite != "s5_confidence"
-                ):
-                    row.append("")
-                else:
-                    value = fmt(getattr(cell, key, None))
-                    if key in ("accuracy", "macro_f1") and cell.n_rows and (
-                        cell.n_failed / cell.n_rows > 0.05
-                    ):
-                        value = f"{value}*"  # partial coverage: see failure table
-                    row.append(value)
-            rows.append(row)
-        header = ["contender"] + [SUITE_TITLES.get(s, s) for s in model.suites]
-        if key in ("accuracy", "macro_f1"):
-            title += " (*: more than 5% of rows failed; see the failure table)"
-        tables.append((title, header, rows))
-    return tables
+LATENCY_SCOPE_TEXT = {
+    "request": (
+        "Latency covers one provider request (the final attempt of each "
+        "decision)."
+    ),
+    "decision": (
+        "Latency covers the complete decision: first attempt through final "
+        "outcome, including retry backoff."
+    ),
+    "mixed": (
+        "Latency scopes are mixed across source runs; see each cell's "
+        "source run and protocol version."
+    ),
+}
 
 
 def render_md(model: ReportModel, json_path: Path | None = None) -> str:
@@ -630,17 +1124,32 @@ def render_md(model: ReportModel, json_path: Path | None = None) -> str:
         "",
         f"Runs: {', '.join(r.run_id for r in model.runs)}.",
         f"Total spend from usage fields: ${model.spend_usd:.2f} "
-        "(list prices, dated in the price table).",
+        "(list prices, dated in the price table; spend of the selected "
+        f"cells: ${model.selected_spend_usd:.2f}).",
         "",
         "Every number in this file recomputes from `results.jsonl` and the",
-        "manifests in the raw archive. Accuracy, macro-F1, ECE, and Brier cover",
-        "valid decisions on items with a gold label; malformed and failed",
-        "attempts have their own columns. Latency percentiles cover valid rows",
-        "across all repeats. Cost covers every attempt that reported usage.",
-        "S5 accuracy covers the underdetermined items only; the honesty columns",
-        "cover the no-good-option items.",
+        "manifests in the raw archive. Later runs replace earlier cells",
+        "whole; each coverage row names its source run.",
+        "",
+        "Denominators:",
+        "",
+        "- Accuracy, macro-F1, ECE, and Brier cover valid decisions on",
+        "  items with a gold label.",
+        "- Completion coverage is completed decisions divided by expected",
+        "  decisions; valid coverage is valid decisions divided by expected",
+        "  decisions.",
+        "- Malformed and failed rates use completed decisions as the",
+        "  denominator.",
+        "- Cost covers the attempt charges each cell's `cost_scope` names;",
+        "  unknown usage is never treated as a measured zero.",
+        f"- {LATENCY_SCOPE_TEXT[model.latency_scope]}",
         "",
     ]
+    if model.correction_note:
+        lines += ["## Correction note", "", model.correction_note, ""]
+    if model.protocol_notes:
+        lines += ["## Protocol and data caveats", ""]
+        lines += [f"- {n}" for n in model.protocol_notes] + [""]
     if model.deviations:
         lines += ["## Protocol deviations (recorded, not edited)", ""]
         lines += [f"- {d}" for d in model.deviations] + [""]
@@ -651,6 +1160,14 @@ def render_md(model: ReportModel, json_path: Path | None = None) -> str:
         lines += ["## Run notes", ""]
         lines += [f"- {n}" for n in model.notes] + [""]
 
+    lines += [
+        "## Coverage (expected versus completed decisions)", "",
+        _md_table(_COVERAGE_HEADER, _coverage_rows(model)),
+        "",
+        "A cell is partial when it stopped early or returned malformed or",
+        "failed decisions. Empty, failed, and skipped cells stay listed",
+        "with their reasons.", "",
+    ]
     for title, header, rows in _metric_tables(model):
         lines += [f"## {title}", "", _md_table(header, rows), ""]
 
@@ -708,12 +1225,22 @@ def render_html(model: ReportModel, tables: list[Table]) -> str:
         f"<style>{_PAGE_CSS}</style></head><body>",
         "<h1>Decision-model benchmark: results</h1>",
         f"<p>Runs: {html.escape(', '.join(r.run_id for r in model.runs))}. "
-        f"Total spend from usage fields: ${model.spend_usd:.2f}.</p>",
-        "<p>Every number recomputes from <code>results.jsonl</code> and the manifests",
-        " in the raw archive. Accuracy, macro-F1, ECE, and Brier cover valid",
-        " decisions on gold-labelled items; malformed and failed attempts have",
-        " their own columns. Cost covers every attempt that reported usage.</p>",
+        f"Total spend from usage fields: ${model.spend_usd:.2f}; selected "
+        f"cells: ${model.selected_spend_usd:.2f}.</p>",
+        "<p>Every number recomputes from <code>results.jsonl</code> and the",
+        " manifests in the raw archive. Accuracy, macro-F1, ECE, and Brier",
+        " cover valid decisions on gold-labelled items; malformed and failed",
+        " attempts have their own columns. Cost covers the attempt charges",
+        " each cell's cost scope names.</p>",
+        f"<p>{html.escape(LATENCY_SCOPE_TEXT[model.latency_scope])}</p>",
     ]
+    if model.correction_note:
+        parts.append("<h2>Correction note</h2>")
+        parts.append(f"<pre>{html.escape(model.correction_note)}</pre>")
+    if model.protocol_notes:
+        parts.append("<h2>Protocol and data caveats</h2><ul>")
+        parts += [f"<li>{html.escape(n)}</li>" for n in model.protocol_notes]
+        parts.append("</ul>")
     if model.deviations:
         parts.append("<h2>Protocol deviations</h2><ul>")
         parts += [f"<li>{html.escape(d)}</li>" for d in model.deviations]
@@ -723,6 +1250,8 @@ def render_html(model: ReportModel, tables: list[Table]) -> str:
         parts += [f"<li>{html.escape(s['contender'])}: {html.escape(s['reason'])}</li>"
                   for s in model.skipped]
         parts.append("</ul>")
+    parts.append("<h2>Coverage (expected versus completed decisions)</h2>")
+    parts.append(_html_table(_COVERAGE_HEADER, _coverage_rows(model)))
     for title, header, rows in tables:
         parts.append(f"<h2>{html.escape(title)}</h2>")
         parts.append(_html_table(header, rows))
@@ -750,15 +1279,21 @@ def render_report(
     run_dir: Path,
     out_dir: Path,
     extra_run_dirs: list[Path] | None = None,
+    name: str | None = None,
+    allow_protocol_mix: bool = False,
+    correction_note_path: Path | None = None,
 ) -> Path:
     """Render MD, HTML, SVGs, JSON summary, and the raw archive."""
+    validate_table_specs()
     run_dirs = [run_dir, *(extra_run_dirs or [])]
     runs = [load_run(d) for d in run_dirs]
     root = run_dir.resolve().parents[1]
-    model = build_report_model(runs, root)
+    model = build_report_model(runs, root, allow_protocol_mix=allow_protocol_mix)
+    if correction_note_path is not None:
+        model.correction_note = correction_note_path.read_text(encoding="utf-8").strip()
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    name = run_dir.name
+    name = name or run_dir.name
     (out_dir / "cardinality.svg").write_text(
         cardinality_svg(model.cardinality), encoding="utf-8"
     )

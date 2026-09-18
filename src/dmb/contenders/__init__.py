@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 
 from .base import Contender
-from .baselines import KeywordBaseline, MajorityBaseline, RandomBaseline, build_majority_table
+from .baselines import KeywordBaseline, MajorityBaseline, RandomBaseline
 from .jev import JevContender
 from .llm_anthropic import AnthropicContender
 from .llm_cerebras import cerebras_contender
@@ -38,20 +38,36 @@ def build_contenders(
     include_jev: bool = False,
     majority_table: dict[frozenset[str], tuple[str, float]] | None = None,
     negotiate: bool = True,
-) -> tuple[list[Contender], list[dict]]:
-    """Build every contender whose key is present; skip the rest.
+    wanted: list[str] | None = None,
+) -> tuple[list[Contender], list[dict], dict[str, dict[str, int]]]:
+    """Build every selected contender whose key is present; skip the rest.
 
-    Returns ``(contenders, skipped)`` where each skip carries a recorded
-    reason (SPEC.md T2.5). ``negotiate`` runs each live contender's cheap
-    probe call so unsupported parameters drop out before scoring starts.
+    ``wanted`` is a list of substrings. Only registry keys matching at
+    least one substring are considered - baselines included; unselected
+    contenders are neither constructed nor negotiated, so filtering never
+    spends a provider call.
+
+    Returns ``(contenders, skipped, negotiation_usage)`` where each skip
+    carries a recorded reason (SPEC.md T2.5) and ``negotiation_usage``
+    maps contender name to the usage its probe call reported (empty for
+    contenders whose probe failed or reported nothing). ``negotiate`` runs
+    each live contender's cheap probe call so unsupported parameters drop
+    out before scoring starts.
     """
+    def selected(key: str) -> bool:
+        return not wanted or any(w in key for w in wanted)
+
     contenders: list[Contender] = [
         RandomBaseline(),
         MajorityBaseline(majority_table or {}),
         KeywordBaseline(),
     ]
+    contenders = [c for c in contenders if selected(c.name)]
     skipped: list[dict] = []
+    negotiation_usage: dict[str, dict[str, int]] = {}
     for key, env_var, factory in LLM_SPECS:
+        if not selected(key):
+            continue
         if not os.environ.get(env_var):
             skipped.append({"contender": key, "reason": f"env {env_var} not set"})
             continue
@@ -61,19 +77,23 @@ def build_contenders(
             skipped.append({"contender": key, "reason": f"construction failed: {exc}"})
             continue
         if negotiate:
-            contender.negotiate()
+            usage = contender.negotiate()
+            if usage:
+                negotiation_usage[contender.name] = usage
         contenders.append(contender)
-    if include_jev:
+    if include_jev and selected("typesafe:jev"):
         if os.environ.get("TYPESAFE_API_KEY"):
             contender = JevContender()
             if negotiate:
-                contender.negotiate()
+                usage = contender.negotiate()
+                if usage:
+                    negotiation_usage[contender.name] = usage
             contenders.append(contender)
         else:
             skipped.append(
                 {"contender": "typesafe:jev", "reason": "env TYPESAFE_API_KEY not set"}
             )
-    return contenders, skipped
+    return contenders, skipped, negotiation_usage
 
 
 __all__ = [

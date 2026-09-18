@@ -70,13 +70,24 @@ class AnthropicContender(Contender):
         self.notes: list[str] = []
         self._text_fallbacks = 0
 
-    def negotiate(self) -> None:
-        """Probe with one cheap call; adapt to rejected parameters."""
+    def negotiate(self) -> dict[str, int] | None:
+        """Probe with one cheap call; adapt to rejected parameters.
+
+        Returns the probe's reported usage so the runner can bill the
+        negotiation call.
+        """
         try:
-            self._decide("Probe: which storage tier does the nightly backup use?",
-                         ["cold storage", "hot storage"])
+            decision = self._decide("Probe: which storage tier does the nightly backup use?",
+                                    ["cold storage", "hot storage"])
         except Exception as exc:  # noqa: BLE001 - negotiation must not crash setup
             self.notes.append(f"negotiation probe failed: {exc}")
+            return None
+        if decision.input_tokens is None and decision.output_tokens is None:
+            return None
+        return {
+            "input_tokens": decision.input_tokens,
+            "output_tokens": decision.output_tokens,
+        }
 
     def _decide(self, state: str, options: list[str]) -> Decision:
         body: dict = {
@@ -94,12 +105,20 @@ class AnthropicContender(Contender):
         if getattr(self, "_thinking_off", False):
             body.pop("thinking")
         response = self._post(body)
-        if response.get("stop_reason") == "max_tokens":
-            raise MalformedReply("truncated at max_tokens", raw=response)
-        tool_input, source = self._extract_tool_input(response)
-        if not isinstance(tool_input, dict):
-            raise MalformedReply(f"tool input is not an object: {tool_input!r}", raw=response)
-        choice_index, confidence = validate_decision_dict(tool_input, len(options))
+        try:
+            if response.get("stop_reason") == "max_tokens":
+                raise MalformedReply("truncated at max_tokens", raw=response)
+            tool_input, source = self._extract_tool_input(response)
+            if not isinstance(tool_input, dict):
+                raise MalformedReply(
+                    f"tool input is not an object: {tool_input!r}", raw=response
+                )
+            choice_index, confidence = validate_decision_dict(tool_input, len(options))
+        except MalformedReply as exc:
+            # The HTTP call succeeded; bill and record its usage even though
+            # the reply never became a decision.
+            exc.attach(*anthropic_usage(response), response)
+            raise
         if source == "text_fallback":
             self._text_fallbacks += 1
             if self._text_fallbacks == 1:

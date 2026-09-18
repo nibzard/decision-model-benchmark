@@ -57,19 +57,27 @@ class JSONModeContender(Contender):
 
     # ---- protocol -------------------------------------------------------
 
-    def negotiate(self) -> None:
+    def negotiate(self) -> dict[str, int] | None:
         """Probe the provider with one cheap call; drop unsupported params.
 
         Costs one two-option call. Failures here do not score anything;
-        ``self.notes`` records what was adapted.
+        ``self.notes`` records what was adapted. Returns the probe's
+        reported usage so the runner can bill the negotiation call.
         """
         try:
-            self._decide(
+            decision = self._decide(
                 "Probe: which storage tier does the nightly backup use?",
                 ["cold storage", "hot storage"],
             )
         except Exception as exc:  # noqa: BLE001 - negotiation must not crash setup
             self.notes.append(f"negotiation probe failed: {exc}")
+            return None
+        if decision.input_tokens is None and decision.output_tokens is None:
+            return None
+        return {
+            "input_tokens": decision.input_tokens,
+            "output_tokens": decision.output_tokens,
+        }
 
     def _decide(self, state: str, options: list[str]) -> Decision:
         body: dict[str, Any] = {
@@ -87,8 +95,14 @@ class JSONModeContender(Contender):
         body.update(self._extra_body)
 
         response = self._post(body)
-        content = self._extract_content(response)
-        choice_index, confidence = parse_decision_payload(content, len(options))
+        try:
+            content = self._extract_content(response)
+            choice_index, confidence = parse_decision_payload(content, len(options))
+        except MalformedReply as exc:
+            # The HTTP call succeeded; bill and record its usage even though
+            # the reply never became a decision.
+            exc.attach(*openai_style_usage(response), response)
+            raise
         input_tokens, output_tokens = openai_style_usage(response)
         return Decision(
             choice_index=choice_index,
