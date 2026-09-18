@@ -1,0 +1,9 @@
+# DMB gitignore - item data and run outputs stay out of git
+data/
+runs/
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
