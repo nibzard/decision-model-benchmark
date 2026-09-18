@@ -13,9 +13,9 @@ actually deliver, at what latency, cost, and failure rate?
 
 Publishing this post on nibzard.com is a manual step. The generated
 report and the raw archive are the source of truth and live in the
-repository under `results/` (`v1.md`, `v1.1.md`, and the
-`v1-raw.tar.gz` / `v1.1-raw.tar.gz` logs they recompute from); every
-number below quotes them.
+repository under `results/`; every number below quotes them. Version 2
+(`v2.md`, with `v2/CORRECTIONS.md`) is the corrected report and
+supersedes `v1.md` and `v1.1.md`, which stay published unchanged.
 
 ## Method in one paragraph
 
@@ -66,7 +66,7 @@ S5 rows. Malformed replies are near zero everywhere else.
 | gpt-5.4-mini | 74.0% | 66.1% | 99.8% | 73.1% | $0.69 | 660-710 ms |
 | gpt-5.4-nano | 70.9% | 67.3% | 93.2% | 68.6% | $0.19 | 684-782 ms |
 | keyword baseline | 29.3% | 54.0% | 100% | 38.0% | $0 | 0 ms |
-| majority baseline | 1.3% | 87.7% | 8.0% | 2.0% | $0 | 0 ms |
+| majority baseline | 1.3% | 87.7% | 8.0% | 1.0% | $0 | 0 ms |
 | random baseline | 1.7% | 53.7% | 5.5% | 2.7% | $0 | 0 ms |
 
 Read the table before the claims:
@@ -125,10 +125,39 @@ Read the table before the claims:
 
 $28.34 of measured provider spend across both releases ($28.14 for the
 LLM release, $0.21 for jev), 2.9 hours of wall time for v1 plus 5
-minutes for v1.1, and 49,500 logged decision rows. The full manifests
-pin item-file hashes, the price-table hash, library versions, and every
+minutes for v1.1, and 49,500 logged decision rows. The v2 correction
+run added 1,800 baseline rows at zero cost. The full manifests pin
+item-file hashes, the price-table hash, library versions, and every
 protocol deviation. Nothing was cherry-picked; the reports are
 generated, not written.
+
+## Corrections in v2
+
+A review of the v1 code found four reporting defects. The v2 report
+fixes them; `results/v2/CORRECTIONS.md` maps every changed number to
+its defect. The numbers above already quote the corrected values. What
+changed:
+
+- The majority baseline's prior table let a later suite overwrite an
+  option set shared by S1 and S4. The S4 cell silently used the S4
+  prior instead of the pinned S1 prior. Corrected S4 accuracy: 2.0% to
+  1.0%; recorded confidence: 0.02 to 0.013333. The S1 accuracy rounds
+  to the same 1.3%.
+- Macro-F1 now scores stable option texts as classes. v1 averaged over
+  option positions, which permute per item on S4. S3 and S5 cells now
+  say `n/a` because their option texts vary between items. Under the
+  corrected definition the S2 majority macro-F1 is 0.467140.
+- Baseline cost is now a measured zero: deterministic baselines make no
+  billable calls. v1 printed unknown.
+- v1 kept only the final attempt's usage, so any decision that hit a
+  retry undercounted cost. v2 runs bill every attempt; for v1 cells the
+  report marks the cost as a lower bound, not an exact number.
+- Latency scope is now stated per cell: v1 cells cover one request; v2
+  cells cover the whole decision, including retry backoff.
+
+The original `v1.md` and `v1.1.md` reports stay published unchanged;
+v2 adds two corrected baseline cells from a free re-run and recomputes
+the rest from the existing rows.
 
 ## Protocol deviations, recorded not hidden
 
@@ -164,4 +193,5 @@ generated, not written.
 Clone the repository, set API keys, run `uv run dmb build`, `uv run dmb
 run --run-id v1`, and `uv run dmb report runs/v1 --out results`. The
 item files rebuild byte-identical from a pinned seed. Compare the hashes
-in your manifest against the published ones.
+in your manifest against the published ones. The README shows the exact
+commands that produced the merged v2 report.
