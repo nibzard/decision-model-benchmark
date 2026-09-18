@@ -1,0 +1,1 @@
+Context: audit of the public repo found six rendering defects in the generated v2 report. All fixed in src/dmb/report.py and regenerated offline from runs/; a vision check on the screenshot caught the missing cutoff marker that unit tests missed, because rejected Ns keep all-None by_n entries. Cell numbers verified unchanged.
