@@ -765,7 +765,7 @@ def render_report(
             reliability_svg(contender, model.reliability[contender]), encoding="utf-8"
         )
 
-    json_path = out_dir / f"{_safe(name)}.cells.json"
+    json_path = out_dir / f"{name}.cells.json"
     json_path.write_text(
         json.dumps(model.json_summary(), indent=2, default=str) + "\n", encoding="utf-8"
     )
