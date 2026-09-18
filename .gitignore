@@ -8,3 +8,4 @@ __pycache__/
 .ruff_cache/
 *.egg-info/
 .claude/ralph-loop.local.md
+.env
