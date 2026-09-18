@@ -573,7 +573,16 @@ def cardinality_svg(
     series: dict[str, dict[int, dict[str, float]]],
     title: str = "S3 cardinality: accuracy and p50 latency versus N",
 ) -> str:
-    """Two-panel SVG: accuracy versus N and p50 latency versus N (log x)."""
+    """Two-panel SVG: accuracy versus N and p50 latency versus N (log x).
+
+    A legend below the panels maps colors to contenders. A dashed rule in
+    the contender's color marks the first N where its line stops; the
+    legend names the last N it covers. An N whose entry holds only None
+    values (rows exist, no valid decision) does not count as covered -
+    the line ends at the last N with a value. Crowded tick labels (254,
+    255, 256 sit 0.2 px apart on the log axis) are thinned by priority:
+    endpoints and truncation boundaries win.
+    """
     ns = sorted({n for points in series.values() for n in points})
     if not ns:
         return "<svg xmlns='http://www.w3.org/2000/svg' width='720' height='60'></svg>"
@@ -582,8 +591,45 @@ def cardinality_svg(
         frac = math.log2(n) / math.log2(ns[-1])
         return left + frac * width
 
-    w, h, pad = 720.0, 320.0, 46.0
+    order = sorted(series.items())
+    colors = {name: PALETTE[idx % len(PALETTE)] for idx, (name, _) in enumerate(order)}
+    truncations: list[tuple[str, int, int]] = []
+    for name, points in order:
+        drawn = [
+            n for n, p in points.items()
+            if p.get("accuracy") is not None or p.get("p50_ms") is not None
+        ]
+        if drawn and max(drawn) < ns[-1]:
+            last_n = max(drawn)
+            truncations.append((name, last_n, min(n for n in ns if n > last_n)))
+    boundaries = {n for _, last, miss in truncations for n in (last, miss)}
+
+    def choose_ticks(left: float, width: float) -> set[int]:
+        """Ticks whose labels clear each other; gridlines stay for every N."""
+
+        def priority(n: int) -> int:
+            if n in (ns[0], ns[-1]):
+                return 100
+            if n in boundaries:
+                return 80
+            if n & (n - 1) == 0:
+                return 50  # powers of two
+            return 10
+
+        chosen: list[int] = []
+        for n in sorted(ns, key=lambda v: (-priority(v), v)):
+            x = x_of(n, left, width)
+            if all(abs(x - x_of(c, left, width)) >= 22.0 for c in chosen):
+                chosen.append(n)
+        return set(chosen)
+
+    w, pad = 720.0, 46.0
     panel_w = (w - 2 * pad - 30) / 2
+    top, height = 40.0, 230.0
+    legend_cols = 2 if len(order) > 8 else 1
+    legend_rows = math.ceil(len(order) / legend_cols)
+    legend_top = top + height + 34.0
+    h = legend_top + legend_rows * 16.0 + 10.0
     out = [
         f"<svg xmlns='http://www.w3.org/2000/svg' width='{w:.0f}' height='{h:.0f}' "
         f"viewBox='0 0 {w:.0f} {h:.0f}' font-family='monospace' font-size='11'>",
@@ -594,19 +640,22 @@ def cardinality_svg(
          ("p50_ms", "p50 latency (ms)", lambda v: f"{v:,.0f}"))
     ):
         left = pad + panel * (panel_w + 30)
-        top, height = 40.0, h - 90
         out.append(
             f"<text x='{left}' y='36'>{label}</text>"
             f" <rect x='{left}' y='{top}' width='{panel_w}' height='{height}' "
             f"fill='#f8f8f8' stroke='#ccc'/>"
         )
-        # x ticks for every N
+        # x gridlines for every N; labels only on ticks that clear each other
+        labeled = choose_ticks(left, panel_w)
         for n in ns:
             x = x_of(n, left, panel_w)
+            tick = (
+                f"<text x='{x:.1f}' y='{top + height + 14}' "
+                f"text-anchor='middle'>{n}</text>"
+            ) if n in labeled else ""
             out.append(
                 f"<line x1='{x:.1f}' y1='{top}' x2='{x:.1f}' y2='{top + height}' "
-                f"stroke='#e4e4e4'/>"
-                f"<text x='{x:.1f}' y='{top + height + 14}' text-anchor='middle'>{n}</text>"
+                f"stroke='#e4e4e4'/>{tick}"
             )
         all_y = [
             p[key]
@@ -634,8 +683,8 @@ def cardinality_svg(
                 f"stroke='#e4e4e4'/>"
                 f"<text x='{left - 6}' y='{y + 4:.1f}' text-anchor='end'>{y_fmt(v)}</text>"
             )
-        for idx, (_name, points) in enumerate(sorted(series.items())):
-            color = PALETTE[idx % len(PALETTE)]
+        for name, points in order:
+            color = colors[name]
             coords = [
                 (x_of(n, left, panel_w), y_of(points[n][key]))
                 for n in ns
@@ -647,6 +696,27 @@ def cardinality_svg(
                     f"<circle cx='{coords[-1][0]:.1f}' cy='{coords[-1][1]:.1f}' "
                     f"r='2.5' fill='{color}'/>"
                 )
+        for name, _last, first_missing in truncations:
+            x = x_of(first_missing, left, panel_w)
+            out.append(
+                f"<line x1='{x:.1f}' y1='{top}' x2='{x:.1f}' y2='{top + height}' "
+                f"stroke='{colors[name]}' stroke-width='1.5' "
+                f"stroke-dasharray='3 3' opacity='0.85'/>"
+            )
+    legend_last = {name: last for name, last, _ in truncations}
+    col_w = (w - 2 * pad) / legend_cols
+    for i, (name, _) in enumerate(order):
+        col, row = i % legend_cols, i // legend_cols
+        x, y = pad + col * col_w, legend_top + row * 16.0
+        text = name + (
+            f" (ends at N={legend_last[name]})" if name in legend_last else ""
+        )
+        out.append(
+            f"<line x1='{x:.1f}' y1='{y - 3.5:.1f}' x2='{x + 14:.1f}' "
+            f"y2='{y - 3.5:.1f}' stroke='{colors[name]}' stroke-width='3' "
+            f"stroke-linecap='round'/>"
+            f"<text x='{x + 20:.1f}' y='{y:.1f}'>{html.escape(text)}</text>"
+        )
     out.append("</svg>")
     return "".join(out)
 
@@ -662,6 +732,17 @@ def reliability_svg(name: str, bins: list[dict]) -> str:
         f"<text x='{pad}' y='20'>{html.escape(name)}: reliability (pooled suites)</text>",
         f"<rect x='{pad}' y='{top}' width='{w - 2 * pad}' height='{height}' "
         f"fill='#f8f8f8' stroke='#ccc'/>",
+    ]
+    # y gridlines at 0, 0.25, ..., 1 so bar and dot heights read directly
+    for i in range(5):
+        v = i / 4
+        y = top + height - v * height
+        out.append(
+            f"<line x1='{pad}' y1='{y:.1f}' x2='{w - pad}' y2='{y:.1f}' "
+            f"stroke='#e4e4e4'/>"
+            f"<text x='{pad - 6:.0f}' y='{y + 4:.1f}' text-anchor='end'>{v:.2f}</text>"
+        )
+    out += [
         f"<line x1='{pad}' y1='{top}' x2='{w - pad}' y2='{top + height}' "
         f"stroke='#999' stroke-dasharray='4 3'/>",
         f"<text x='{w - pad}' y='{top - 6}' text-anchor='end'>perfect calibration</text>",
@@ -871,10 +952,18 @@ def _metric_tables(model: ReportModel) -> list[tuple[str, list[str], list[list[s
     """One table per metric: (title, header, rows), from validated specs."""
     tables: list[tuple[str, list[str], list[list[str]]]] = []
     for spec in _table_specs():
+        if spec.suites is not None and not spec.out_of_scope:
+            # The metric applies to named suites only. Blank out-of-scope
+            # columns read as a broken table, so list the suites measured.
+            table_suites = [s for s in model.suites if s in spec.suites]
+        else:
+            table_suites = list(model.suites)
+        if not table_suites:
+            continue  # this report holds no cell the metric applies to
         rows = []
         for contender in model.contenders:
             row = [contender]
-            for suite in model.suites:
+            for suite in table_suites:
                 cell = model.cells.get((contender, suite))
                 if cell is None:
                     row.append("-")
@@ -893,7 +982,7 @@ def _metric_tables(model: ReportModel) -> list[tuple[str, list[str], list[list[s
                     value += "†"  # cost is a lower bound or partial
                 row.append(value)
             rows.append(row)
-        header = ["contender"] + [SUITE_TITLES.get(s, s) for s in model.suites]
+        header = ["contender"] + [SUITE_TITLES.get(s, s) for s in table_suites]
         title = spec.title
         if spec.star_partial:
             title += " (*: partial coverage; see the coverage table)"
@@ -1117,6 +1206,28 @@ LATENCY_SCOPE_TEXT = {
 }
 
 
+def _demote_headings(text: str) -> str:
+    """One heading level deeper, so an inlined note cannot restart H1.
+
+    Fenced code blocks pass through untouched. Lines without a space
+    after the hashes are not headings and stay as they are.
+    """
+    out: list[str] = []
+    fenced = False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+            out.append(line)
+            continue
+        if not fenced and line.startswith("#"):
+            stripped = line.lstrip("#")
+            level = len(line) - len(stripped)
+            if 1 <= level <= 5 and not stripped[:1].strip():
+                line = "#" + line
+        out.append(line)
+    return "\n".join(out)
+
+
 def render_md(model: ReportModel, json_path: Path | None = None) -> str:
     """The full Markdown report."""
     lines = [
@@ -1146,7 +1257,7 @@ def render_md(model: ReportModel, json_path: Path | None = None) -> str:
         "",
     ]
     if model.correction_note:
-        lines += ["## Correction note", "", model.correction_note, ""]
+        lines += ["## Correction note", "", _demote_headings(model.correction_note), ""]
     if model.protocol_notes:
         lines += ["## Protocol and data caveats", ""]
         lines += [f"- {n}" for n in model.protocol_notes] + [""]

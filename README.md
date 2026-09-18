@@ -68,7 +68,7 @@ record.
 - [`blog/v1-post.md`](blog/v1-post.md) — the post drafted for
   nibzard.com; it quotes the corrected numbers.
 - `src/dmb/` — adapters for every contender, the runner, the metrics,
-  and the report generator. `tests/` — 141 tests, no network needed.
+  and the report generator. `tests/` — 143 tests, no network needed.
 
 ## Reproduce it
 

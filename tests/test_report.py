@@ -576,12 +576,19 @@ def test_render_report_end_to_end(tmp_path: Path):
 def test_render_report_includes_correction_note(tmp_path: Path):
     run_dir = _write_run(tmp_path, "vcorr", "openai:test-model", _one_suite_rows())
     note = tmp_path / "note.md"
-    note.write_text("## What changed\n\nS4 majority prior corrected.\n")
+    note.write_text(
+        "# Corrections in v2\n\n## What changed\n\nS4 majority prior corrected.\n"
+    )
     out = render_report(run_dir, tmp_path / "results3", correction_note_path=note)
     md = (out / "vcorr.md").read_text(encoding="utf-8")
     html_out = (out / "vcorr.html").read_text(encoding="utf-8")
     assert "S4 majority prior corrected." in md
     assert "S4 majority prior corrected." in html_out
+    # The inlined note sits under an H2, so its own headings move one
+    # level down; the report keeps exactly one H1.
+    assert "## Corrections in v2" in md
+    assert "### What changed" in md
+    assert "\n# Corrections in v2" not in md
 
 
 def test_reliability_and_cardinality_svg_shape():
@@ -590,9 +597,51 @@ def test_reliability_and_cardinality_svg_shape():
     assert sum(b["n"] for b in bins) == 2
     svg = reliability_svg("x:y", bins)
     assert svg.startswith("<svg") and "x:y" in svg
+    # y-axis labels make bar and dot heights readable.
+    assert ">0.50<" in svg and ">1.00<" in svg
     curve = cardinality_svg({"c": {2: {"accuracy": 0.5, "p50_ms": 10.0},
                                    8: {"accuracy": 0.6, "p50_ms": 20.0}}})
     assert "polyline" in curve
+
+
+def test_cardinality_svg_legend_ticks_and_cutoff():
+    """The figure names its lines, thins crowded ticks, marks the cutoff."""
+    full = (2, 8, 32, 64, 128, 192, 254, 255, 256, 384, 512)
+    series = {
+        "a:full": {n: {"accuracy": 1.0, "p50_ms": 10.0} for n in full},
+        # A rejected N keeps its entry with None values: rows exist, but
+        # no valid decision came back (jev's 400 Too many choices).
+        "b:capped": {
+            **{n: {"accuracy": 1.0, "p50_ms": 20.0} for n in full if n <= 255},
+            **{n: {"accuracy": None, "p50_ms": None} for n in full if n > 255},
+        },
+    }
+    svg = cardinality_svg(series)
+    # Legend: every line is named; a truncated one says where it ends.
+    assert ">a:full<" in svg
+    assert "b:capped (ends at N=255)" in svg
+    # Dashed rule at the first N the truncated contender does not answer.
+    assert svg.count("stroke-dasharray='3 3'") == 2  # one per panel
+    # Crowded ticks: 255 (last answered N) keeps its label; the labels it
+    # collides with are dropped in both panels.
+    assert svg.count(">255<") == 2
+    assert ">254<" not in svg and ">256<" not in svg
+
+
+def test_single_suite_metric_tables_list_only_measured_suites(tmp_path: Path):
+    """S4-only and S5-only tables drop the all-blank suite columns."""
+    suites = {"s4_order": [_row("i1", "s4_order", 0, 0.9, 0)]}
+    run_dir = _write_run(tmp_path, "vs4", "openai:test-model", suites)
+    model = build_report_model([load_run(run_dir)], tmp_path)
+    tables = report._metric_tables(model)
+    flip = next(t for t in tables if t[0].startswith("S4 flip rate"))
+    assert flip[1] == ["contender", "S4 order stability"]
+    assert all(len(row) == 2 for row in flip[2])
+    # No S5 cell exists, so the S5 tables carry no column and are dropped.
+    assert not any(t[0].startswith("S5") for t in tables)
+    # Suite-wide tables still list every suite of the report.
+    acc = next(t for t in tables if t[0].startswith("Accuracy"))
+    assert acc[1] == ["contender", "S4 order stability"]
 
 
 def test_build_report_model_merges_extra_runs(tmp_path: Path):
