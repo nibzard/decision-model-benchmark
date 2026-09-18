@@ -347,6 +347,14 @@ def run_grid(spec: RunSpec, repo_root: Path | None = None) -> Path:
                 results_handle.write(json.dumps(row, default=str) + "\n")
             results_handle.flush()
             manifest["cells"] = sorted(cells, key=lambda c: (c["contender"], c["suite"]))
+            manifest["contenders"] = [
+                {
+                    "name": c.name,
+                    "provider": c.provider,
+                    "notes": list(getattr(c, "notes", [])),
+                }
+                for c in spec.contenders
+            ]
             manifest["spend_usd"] = round(tracker.spent_usd, 4)
             manifest["spend_by_contender_usd"] = {
                 k: round(v, 4) for k, v in tracker.by_contender.items()

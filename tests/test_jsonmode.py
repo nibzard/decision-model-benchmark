@@ -86,3 +86,55 @@ class TestUsageExtraction:
     def test_validate_dict_rejects_bool(self):
         with pytest.raises(MalformedReply):
             validate_decision_dict({"choice_index": 1, "confidence": True}, 3)
+
+
+class TestAnthropicTextFallback:
+    """The gateway sometimes answers in text instead of calling the tool."""
+
+    def _contender(self):
+        import os
+
+        os.environ.setdefault("ANTHROPIC_AUTH_TOKEN", "test-token")
+        from dmb.contenders.llm_anthropic import AnthropicContender
+
+        return AnthropicContender("claude-haiku-4-5")
+
+    def test_tool_use_block_preferred(self):
+        contender = self._contender()
+        response = {
+            "content": [
+                {"type": "text", "text": "thinking out loud"},
+                {"type": "tool_use", "name": "record_decision",
+                 "input": {"choice_index": 1, "confidence": 0.5}},
+            ]
+        }
+        payload, source = contender._extract_tool_input(response)
+        assert source == "tool_use"
+        assert payload == {"choice_index": 1, "confidence": 0.5}
+
+    def test_text_block_parsed_when_no_tool_use(self):
+        contender = self._contender()
+        response = {
+            "content": [
+                {"type": "text", "text": '{"choice_index": 0, "confidence": 0.9}'},
+            ]
+        }
+        payload, source = contender._extract_tool_input(response)
+        assert source == "text_fallback"
+        assert payload == {"choice_index": 0, "confidence": 0.9}
+
+    def test_both_paths_failing_is_malformed(self):
+        from dmb.contenders.base import MalformedReply
+
+        contender = self._contender()
+        response = {"content": [{"type": "text", "text": "no json here"}]}
+        with pytest.raises(MalformedReply):
+            contender._extract_tool_input(response)
+
+    def test_truncation_is_malformed(self):
+        from dmb.contenders.base import MalformedReply
+
+        contender = self._contender()
+        contender._post = lambda body: {"stop_reason": "max_tokens"}
+        with pytest.raises(MalformedReply):
+            contender._decide("state text", ["a", "b"])

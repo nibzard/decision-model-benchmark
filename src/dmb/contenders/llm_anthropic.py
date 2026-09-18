@@ -16,7 +16,7 @@ import os
 import httpx
 
 from .base import AuthError, Contender, Decision, MalformedReply, RateLimited, TransportError
-from .jsonmode import anthropic_usage, validate_decision_dict
+from .jsonmode import anthropic_usage, extract_json_object, validate_decision_dict
 from .render import SYSTEM_PROMPT, render_prompt
 
 TIMEOUT = httpx.Timeout(120.0, connect=15.0)
@@ -68,6 +68,7 @@ class AnthropicContender(Contender):
             },
         )
         self.notes: list[str] = []
+        self._text_fallbacks = 0
 
     def negotiate(self) -> None:
         """Probe with one cheap call; adapt to rejected parameters."""
@@ -95,10 +96,17 @@ class AnthropicContender(Contender):
         response = self._post(body)
         if response.get("stop_reason") == "max_tokens":
             raise MalformedReply("truncated at max_tokens", raw=response)
-        tool_input = self._extract_tool_input(response)
+        tool_input, source = self._extract_tool_input(response)
         if not isinstance(tool_input, dict):
             raise MalformedReply(f"tool input is not an object: {tool_input!r}", raw=response)
         choice_index, confidence = validate_decision_dict(tool_input, len(options))
+        if source == "text_fallback":
+            self._text_fallbacks += 1
+            if self._text_fallbacks == 1:
+                self.notes.append(
+                    "forced tool call not honored on some replies; parsed the "
+                    "text block instead (each raw row carries tool_input_source)"
+                )
         input_tokens, output_tokens = anthropic_usage(response)
         return Decision(
             choice_index=choice_index,
@@ -108,6 +116,8 @@ class AnthropicContender(Contender):
             raw={
                 "provider": "anthropic",
                 "model": self.model,
+                "tool_input_source": source,
+                "text_fallbacks": self._text_fallbacks,
                 "response": response,
                 "notes": list(self.notes),
             },
@@ -146,14 +156,29 @@ class AnthropicContender(Contender):
         except ValueError as exc:
             raise MalformedReply(f"non-JSON HTTP body: {exc}", raw=response.text[:2000]) from exc
 
-    def _extract_tool_input(self, response: dict) -> object:
+    def _extract_tool_input(self, response: dict) -> tuple[object, str]:
+        """Return ``(payload, source)`` from a tool_use or text block.
+
+        The gateway sometimes ignores the forced tool call and answers in
+        a text block. When that happens the text is parsed as JSON; the
+        row records ``tool_input_source: text_fallback``. Malformed only
+        when neither path yields a valid object.
+        """
+        text_blocks: list[str] = []
         try:
             for block in response["content"]:
                 if block.get("type") == "tool_use" and block.get("name") == "record_decision":
-                    return block["input"]
+                    return block["input"], "tool_use"
+                if block.get("type") == "text" and isinstance(block.get("text"), str):
+                    text_blocks.append(block["text"])
         except (KeyError, TypeError) as exc:
             raise MalformedReply(f"unexpected response shape: {exc}", raw=response) from exc
-        raise MalformedReply("no tool_use block in response", raw=response)
+        for text in text_blocks:
+            try:
+                return extract_json_object(text), "text_fallback"
+            except MalformedReply:
+                continue
+        raise MalformedReply("no tool_use block and no parseable text in response", raw=response)
 
     def close(self) -> None:
         self._client.close()

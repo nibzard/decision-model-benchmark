@@ -129,8 +129,9 @@ class TestS1S2:
         spam_share = sum(1 for i in items if i.meta["label"] == "spam") / len(items)
         assert spam_share == pytest.approx(0.13, abs=0.02)
         for item in items:
-            assert item.options == ["ham", "spam"]
+            assert sorted(item.options) == ["ham", "spam"]
             assert item.gold_index in (0, 1)
+            assert item.options[item.gold_index] == item.meta["label"]
 
     def test_s2_rows_drop_duplicates_and_junk(self, tmp_path):
         path = tmp_path / "collection"

@@ -53,6 +53,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
     if args.only_jev:
         contenders = [c for c in contenders if c.provider == "typesafe"]
+    if args.contenders:
+        wanted = [w.strip() for w in args.contenders.split(",")]
+        contenders = [c for c in contenders if any(w in c.name for w in wanted)]
     if not contenders:
         print("no contenders available; check env keys", file=sys.stderr)
         return 2
@@ -113,6 +116,10 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--item-limit", type=int, default=None)
     run.add_argument("--include-jev", action="store_true")
     run.add_argument("--only-jev", action="store_true")
+    run.add_argument(
+        "--contenders",
+        help="comma-separated substrings; keep only matching contenders",
+    )
     run.add_argument("--hard-cap", type=float, default=60.0)
     run.add_argument("--soft-cap", type=float, default=40.0)
     run.add_argument("--no-negotiate", action="store_true")

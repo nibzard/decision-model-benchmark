@@ -76,13 +76,17 @@ def build_items(rows: list[tuple[str, str]]) -> list[DecisionItem]:
     rng.shuffle(sample)
     items: list[DecisionItem] = []
     for i, (label, text) in enumerate(sample):
+        # Option order is shuffled per item so position bias cannot masquerade
+        # as label skill on this skewed binary task.
+        options = list(OPTIONS)
+        rng.shuffle(options)
         items.append(
             DecisionItem(
                 item_id=f"s2-{i + 1:04d}",
                 suite=SUITE_ID,
                 state=text,
-                options=list(OPTIONS),
-                gold_index=OPTIONS.index(label),
+                options=options,
+                gold_index=options.index(label),
                 kind="gate",
                 meta={
                     "label": label,
