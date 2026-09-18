@@ -60,13 +60,21 @@ def cmd_run(args: argparse.Namespace) -> int:
         run_id=args.run_id,
         suites=suites,
         contenders=contenders,
-        repeats=args.repeats,
+        repeats=1 if args.smoke else args.repeats,
         item_limit=50 if args.smoke else args.item_limit,
         hard_cap_usd=args.hard_cap,
         soft_cap_usd=args.soft_cap,
+        deviations=sorted(
+            {c.deviation for c in contenders if getattr(c, "deviation", None)}
+        ),
         notes=[
-            "skipped contenders: " + json.dumps(skipped) if skipped else "no skips",
-            f"negotiate={not args.no_negotiate}",
+            note
+            for note in (
+                "skipped contenders: " + json.dumps(skipped) if skipped else "no skips",
+                f"negotiate={not args.no_negotiate}",
+                "smoke run: 50 items per suite, 1 repeat" if args.smoke else "",
+            )
+            if note
         ],
     )
     run_dir = run_grid(spec, _repo_root())

@@ -37,6 +37,7 @@ class JSONModeContender(Contender):
         response_format: dict[str, Any] | None = None,
         temperature: float | None = 0.0,
         max_tokens: int = 512,
+        max_tokens_param: str = "max_tokens",
         extra_body: dict[str, Any] | None = None,
         price_name: str | None = None,
     ) -> None:
@@ -48,6 +49,7 @@ class JSONModeContender(Contender):
         self._response_format = response_format
         self._temperature = temperature
         self._max_tokens = max_tokens
+        self._max_tokens_param = max_tokens_param
         self._extra_body = dict(extra_body or {})
         self.notes: list[str] = []
         self._price_name = price_name or name
@@ -81,7 +83,7 @@ class JSONModeContender(Contender):
             body["temperature"] = self._temperature
         if self._response_format is not None:
             body["response_format"] = self._response_format
-        body["max_tokens"] = self._max_tokens
+        body[self._max_tokens_param] = self._max_tokens
         body.update(self._extra_body)
 
         response = self._post(body)
@@ -141,14 +143,25 @@ class JSONModeContender(Contender):
             self._temperature = None
             self.notes.append("dropped temperature=0 after provider 400; provider default applies")
         elif parameter == "max_tokens":
-            self._max_tokens = 10_000  # provider cap; harmless for tiny outputs
-            self.notes.append("raised max_tokens after provider 400")
+            if self._max_tokens_param == "max_tokens":
+                self._max_tokens_param = "max_completion_tokens"
+                self.notes.append(
+                    "renamed max_tokens -> max_completion_tokens after provider 400"
+                )
+            else:
+                self._max_tokens = 10_000  # provider cap; harmless for tiny outputs
+                self.notes.append("raised max token budget after provider 400")
         else:
             self.notes.append(f"provider rejected unknown parameter {parameter}")
 
     def _extract_content(self, response: dict[str, Any]) -> str:
         try:
-            message = response["choices"][0]["message"]
+            choice = response["choices"][0]
+            if choice.get("finish_reason") == "length":
+                raise MalformedReply(
+                    "truncated at max_tokens (finish_reason=length)", raw=response
+                )
+            message = choice["message"]
             content = message.get("content")
             if content is None and message.get("refusal"):
                 raise MalformedReply(f"refusal: {message['refusal'][:200]}", raw=response)

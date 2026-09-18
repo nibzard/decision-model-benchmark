@@ -270,7 +270,13 @@ def run_cell(
 
 
 def run_grid(spec: RunSpec, repo_root: Path | None = None) -> Path:
-    """Execute the full grid and write ``runs/<run_id>/`` with a manifest."""
+    """Execute the full grid and write ``runs/<run_id>/`` with a manifest.
+
+    Contenders of one provider run sequentially in a lane; lanes run in
+    parallel. At most ``spec.concurrency`` requests are in flight per
+    provider at any time (the frozen cap), so lanes never overlap requests
+    for the same provider.
+    """
     root = repo_root or Path(__file__).resolve().parents[2]
     run_dir = root / "runs" / spec.run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -306,7 +312,12 @@ def run_grid(spec: RunSpec, repo_root: Path | None = None) -> Path:
             "item_limit": spec.item_limit,
         },
         "contenders": [
-            {"name": c.name, "provider": c.provider} for c in spec.contenders
+            {
+                "name": c.name,
+                "provider": c.provider,
+                "notes": list(getattr(c, "notes", [])),
+            }
+            for c in spec.contenders
         ],
         "suites": spec.suites,
         "item_files": item_files,
@@ -320,13 +331,38 @@ def run_grid(spec: RunSpec, repo_root: Path | None = None) -> Path:
         "skipped": [],
     }
 
+    lanes: dict[str, list[Contender]] = {}
+    for contender in spec.contenders:
+        lanes.setdefault(contender.provider, []).append(contender)
+
     cells: list[dict] = []
-    stop_all = False
-    with results_path.open("w", encoding="utf-8") as results_handle:
-        for contender in spec.contenders:
-            if stop_all:
-                break
+    state_lock = threading.Lock()
+    stop_all = threading.Event()
+
+    def flush(cell: dict, rows: list[dict]) -> None:
+        """Record one finished cell and rewrite the manifest (under lock)."""
+        with state_lock:
+            cells.append(cell)
+            for row in rows:
+                results_handle.write(json.dumps(row, default=str) + "\n")
+            results_handle.flush()
+            manifest["cells"] = sorted(cells, key=lambda c: (c["contender"], c["suite"]))
+            manifest["spend_usd"] = round(tracker.spent_usd, 4)
+            manifest["spend_by_contender_usd"] = {
+                k: round(v, 4) for k, v in tracker.by_contender.items()
+            }
+            manifest["tokens_by_contender"] = {
+                k: {"input": v[0], "output": v[1]} for k, v in tracker.tokens.items()
+            }
+            (run_dir / "manifest.json").write_text(
+                json.dumps(manifest, indent=2, default=str) + "\n", encoding="utf-8"
+            )
+
+    def run_lane(members: list[Contender]) -> None:
+        for contender in members:
             for suite_id in spec.suites:
+                if stop_all.is_set():
+                    return
                 items = load_items(root / "data" / "suites" / f"{suite_id}.jsonl")
                 if spec.item_limit is not None:
                     items = items[: spec.item_limit]
@@ -348,31 +384,35 @@ def run_grid(spec: RunSpec, repo_root: Path | None = None) -> Path:
                         "wall_s": 0.0,
                     }
                     rows = []
-                cells.append(cell)
-                for row in rows:
-                    results_handle.write(json.dumps(row, default=str) + "\n")
-                results_handle.flush()
-                manifest["cells"] = cells
-                manifest["spend_usd"] = round(tracker.spent_usd, 4)
-                manifest["spend_by_contender_usd"] = {
-                    k: round(v, 4) for k, v in tracker.by_contender.items()
-                }
-                manifest["tokens_by_contender"] = {
-                    k: {"input": v[0], "output": v[1]} for k, v in tracker.tokens.items()
-                }
-                (run_dir / "manifest.json").write_text(
-                    json.dumps(manifest, indent=2, default=str) + "\n", encoding="utf-8"
-                )
-                if cell["status"] in ("auth_error", "budget"):
-                    manifest["skipped"].append({
-                        "contender": contender.name,
-                        "reason": cell["abort_reason"],
-                    })
-                    if cell["status"] == "budget":
-                        stop_all = True  # hard cap: abort the entire grid
-                    break  # skip this contender's remaining suites
-                if cell["status"] == "dnf":
-                    continue  # keep going; DNF is per suite
+                flush(cell, rows)
+                if cell["status"] == "budget":
+                    # Hard cap: the shared tracker now rejects every lane.
+                    with state_lock:
+                        manifest["skipped"].append({
+                            "contender": contender.name,
+                            "reason": cell["abort_reason"],
+                        })
+                    stop_all.set()
+                    return
+                if cell["status"] == "auth_error":
+                    # Lane members share one credential; the key is dead.
+                    with state_lock:
+                        manifest["skipped"].append({
+                            "contender": contender.name,
+                            "reason": cell["abort_reason"],
+                        })
+                    return
+                # DNF keeps partials and moves on to the next suite.
+
+    with results_path.open("w", encoding="utf-8") as results_handle:
+        threads = [
+            threading.Thread(target=run_lane, args=(members,), name=f"dmb-{provider}")
+            for provider, members in lanes.items()
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
 
     manifest["finished_at"] = _now_iso()
     total_wall = sum(c["wall_s"] for c in cells)

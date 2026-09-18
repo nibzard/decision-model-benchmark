@@ -1,4 +1,13 @@
-"""Anthropic contenders with forced tool use for structured output."""
+"""Anthropic contenders with forced tool use for structured output.
+
+The gateway this environment uses serves thinking-enabled output by
+default: the model reasons for hundreds of tokens first and sometimes
+answers in a text block instead of calling the tool. The adapter pins
+``thinking: disabled`` - the provider's minimum-reasoning setting, in
+line with the frozen protocol's fixed-decoding rule. If the endpoint
+rejects the parameter, the adapter drops it and records that the
+as-served default applied instead.
+"""
 
 from __future__ import annotations
 
@@ -33,14 +42,24 @@ TOOL_SCHEMA: dict = {
 
 
 class AnthropicContender(Contender):
-    """One Anthropic contender: ``anthropic:<model>`` via forced tool use."""
+    """One Anthropic contender: ``anthropic:<model>`` via forced tool use.
+
+    Uses ``ANTHROPIC_BASE_URL`` when set (this environment reaches the
+    Anthropic API through a gateway), otherwise the public API.
+    """
+
+    deviation = (
+        "anthropic: gateway serves thinking-enabled output by default; adapter pins "
+        "thinking disabled (provider minimum reasoning), temperature 0"
+    )
 
     def __init__(self, model: str) -> None:
         self.name = f"anthropic:{model}"
         self.provider = "anthropic"
         self.model = model
+        base_url = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
         self._client = httpx.Client(
-            base_url="https://api.anthropic.com",
+            base_url=base_url,
             timeout=TIMEOUT,
             headers={
                 "Authorization": f"Bearer {os.environ['ANTHROPIC_AUTH_TOKEN']}",
@@ -61,16 +80,21 @@ class AnthropicContender(Contender):
     def _decide(self, state: str, options: list[str]) -> Decision:
         body: dict = {
             "model": self.model,
-            "max_tokens": 1024,
+            "max_tokens": 4096,
             "temperature": 0,
             "system": SYSTEM_PROMPT,
             "messages": [{"role": "user", "content": render_prompt(state, options)}],
             "tools": [TOOL_SCHEMA],
             "tool_choice": {"type": "tool", "name": "record_decision"},
+            "thinking": {"type": "disabled"},
         }
         if getattr(self, "_temperature_off", False):
             body.pop("temperature")
+        if getattr(self, "_thinking_off", False):
+            body.pop("thinking")
         response = self._post(body)
+        if response.get("stop_reason") == "max_tokens":
+            raise MalformedReply("truncated at max_tokens", raw=response)
         tool_input = self._extract_tool_input(response)
         if not isinstance(tool_input, dict):
             raise MalformedReply(f"tool input is not an object: {tool_input!r}", raw=response)
@@ -103,12 +127,17 @@ class AnthropicContender(Contender):
         if response.status_code >= 500:
             raise TransportError(f"{response.status_code}: {response.text[:300]}")
         if response.status_code == 400:
-            if "temperature" in response.text.lower() and not getattr(
-                self, "_temperature_off", False
-            ):
+            lowered = response.text.lower()
+            if "temperature" in lowered and not getattr(self, "_temperature_off", False):
                 self._temperature_off = True
                 self.notes.append("dropped temperature=0 after provider 400")
                 raise TransportError(f"400 rejected temperature: {response.text[:300]}")
+            if "thinking" in lowered and not getattr(self, "_thinking_off", False):
+                self._thinking_off = True
+                self.notes.append(
+                    "dropped thinking=disabled after provider 400; as-served default applies"
+                )
+                raise TransportError(f"400 rejected thinking: {response.text[:300]}")
             raise TransportError(f"400: {response.text[:300]}")
         if response.status_code != 200:
             raise TransportError(f"{response.status_code}: {response.text[:300]}")

@@ -34,4 +34,5 @@ def openai_contender(model: str) -> JSONModeContender:
         },
         temperature=0.0,
         max_tokens=4000,
+        max_tokens_param="max_completion_tokens",
     )

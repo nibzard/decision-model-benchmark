@@ -75,6 +75,8 @@ class Contender:
 
     name: str = "contender"
     provider: str = "unknown"
+    deviation: str | None = None
+    """Protocol deviation this adapter pins, recorded in every run manifest."""
 
     def decide(self, state: str, options: list[str]) -> Decision:
         """Pick one option for the state. Raises ContenderError on failure."""
