@@ -1,0 +1,1 @@
+Context: repo had no CI; the test suite is hermetic (no network, no keys), so a single uv job covers lint and tests.
