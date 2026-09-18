@@ -606,9 +606,16 @@ def _metric_tables(model: ReportModel) -> list[tuple[str, list[str], list[list[s
                 ):
                     row.append("")
                 else:
-                    row.append(fmt(getattr(cell, key, None)))
+                    value = fmt(getattr(cell, key, None))
+                    if key in ("accuracy", "macro_f1") and cell.n_rows and (
+                        cell.n_failed / cell.n_rows > 0.05
+                    ):
+                        value = f"{value}*"  # partial coverage: see failure table
+                    row.append(value)
             rows.append(row)
         header = ["contender"] + [SUITE_TITLES.get(s, s) for s in model.suites]
+        if key in ("accuracy", "macro_f1"):
+            title += " (*: more than 5% of rows failed; see the failure table)"
         tables.append((title, header, rows))
     return tables
 
