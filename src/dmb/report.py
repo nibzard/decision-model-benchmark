@@ -548,6 +548,9 @@ def build_report_model(runs: list[RunData], root: Path) -> ReportModel:
     for run in runs:
         deviations.extend(run.manifest.get("deviations", []))
         notes.extend(f"[{run.run_id}] {n}" for n in run.manifest.get("notes", []))
+        for contender in run.manifest.get("contenders", []):
+            for note in contender.get("notes", []):
+                notes.append(f"[{run.run_id}] {contender['name']}: {note}")
         skipped.extend(run.manifest.get("skipped", []))
         spend += run.manifest.get("spend_usd", 0.0)
     return ReportModel(
