@@ -34,6 +34,7 @@ from .contenders.base import (
     ContenderError,
     Decision,
     MalformedReply,
+    ProviderRejected,
     RateLimited,
     TransportError,
 )
@@ -142,6 +143,16 @@ def execute_attempt(
             ))
         except AuthError:
             raise
+        except ProviderRejected as exc:
+            # A measured outcome (for example jev's 255-choice cap), not a
+            # transport fault: no retry, the row records the rejection.
+            attempts.append(
+                {"attempt": attempt, "outcome": "provider_rejected", "detail": str(exc)}
+            )
+            return _finish(
+                item, repeat, attempts,
+                Decision(ok=False, error=f"provider rejected: {exc}"),
+            )
         except (TransportError, TimeoutError, ContenderError) as exc:
             attempts.append({"attempt": attempt, "outcome": "transport", "detail": str(exc)})
             if attempt == 1:
