@@ -179,77 +179,81 @@ Python 3.12, `uv`. Dependencies: `httpx`, `pydantic`, `numpy`. Nothing else.
 
 ### Phase 0 — skeleton (half day)
 
-- [ ] T0.1 `git init`, `uv init`, dependency set, `src/dmb` package, ruff
+- [x] T0.1 `git init`, `uv init`, dependency set, `src/dmb` package, ruff
       config. Done when `uv run pytest` passes with a placeholder test.
-- [ ] T0.2 `contenders/base.py`: `Contender` protocol —
+- [x] T0.2 `contenders/base.py`: `Contender` protocol —
       `decide(state: str, options: list[str]) -> Decision` where `Decision`
       carries `choice_index`, `confidence`, `latency_ms`, `input_tokens`,
       `output_tokens`, `raw`. Plus `MockContender` with scripted replies.
-- [ ] T0.3 `metrics.py` with unit tests: accuracy, macro-F1, 10-bin ECE,
+- [x] T0.3 `metrics.py` with unit tests: accuracy, macro-F1, 10-bin ECE,
       Brier, flip rate. Gold: hand-computed cases.
-- [ ] T0.4 Runner smoke: MockContender × synthetic 20-item suite →
+- [x] T0.4 Runner smoke: MockContender × synthetic 20-item suite →
       `runs/<id>/manifest.json` written, hashes correct.
 
 ### Phase 1 — suites (one day)
 
-- [ ] T1.1 `s2_spam.py`: UCI SMS spam loader → frozen items file
+- [x] T1.1 `s2_spam.py`: UCI SMS spam loader → frozen items file
       (200 eval + 100 spare). License note in the module docstring.
-- [ ] T1.2 `s1_intent77.py`: banking77 loader → frozen items, 77 options
+- [x] T1.2 `s1_intent77.py`: banking77 loader → frozen items, 77 options
       serialized once.
-- [ ] T1.3 `s3_cardinality.py`: generator, seed fixed, planted answers,
+- [x] T1.3 `s3_cardinality.py`: generator, seed fixed, planted answers,
       distractor similarity controlled; N sweep as specified. Unit test:
       every item has exactly one planted answer; regeneration is
       byte-identical given the seed.
-- [ ] T1.4 `s4_order.py`: permutation generator over S1 items; gold mapping
+- [x] T1.4 `s4_order.py`: permutation generator over S1 items; gold mapping
       test.
-- [ ] T1.5 `s5_confidence.py`: no-good-option and underdetermined items,
+- [x] T1.5 `s5_confidence.py`: no-good-option and underdetermined items,
       seeded, hand-reviewed once.
-- [ ] T1.6 `suites/build.py`: builds and hashes all five item files in one
+- [x] T1.6 `suites/build.py`: builds and hashes all five item files in one
       command.
 
 ### Phase 2 — contenders (one day)
 
-- [ ] T2.1 `llm_openai.py` with `json_schema` mode; retries and malformed
+- [x] T2.1 `llm_openai.py` with `json_schema` mode; retries and malformed
       counting per protocol. Smoke: 5 live items.
-- [ ] T2.2 `llm_anthropic.py` with forced tool use. Smoke: 5 live items.
-- [ ] T2.3 `llm_zai.py`, `llm_deepseek.py`, `llm_cerebras.py` (JSON mode,
+- [x] T2.2 `llm_anthropic.py` with forced tool use. Smoke: 5 live items.
+- [x] T2.3 `llm_zai.py`, `llm_deepseek.py`, `llm_cerebras.py` (JSON mode,
       shared parsing path). Smoke: 5 live items each.
-- [ ] T2.4 `baselines.py`: random, majority, keyword.
-- [ ] T2.5 `jev.py`: full adapter against the documented schema, gated on
+- [x] T2.4 `baselines.py`: random, majority, keyword.
+- [x] T2.5 `jev.py`: full adapter against the documented schema, gated on
       `TYPESAFE_API_KEY`; skipped with a recorded reason when absent.
-- [ ] T2.6 Decision-state renderer: one function all contenders share, so
+- [x] T2.6 Decision-state renderer: one function all contenders share, so
       the input text cannot drift between adapters. Pinned by a test.
 
 ### Phase 3 — runner and cost (half day)
 
-- [ ] T3.1 Grid runner: contenders × suites, concurrency 4, backoff, DNF
+- [x] T3.1 Grid runner: contenders × suites, concurrency 4, backoff, DNF
       tracking, live spend tracker with hard-cap abort.
-- [ ] T3.2 Usage extraction per provider (usage fields differ); token
+- [x] T3.2 Usage extraction per provider (usage fields differ); token
       accounting test with recorded response fixtures.
-- [ ] T3.3 3-repeat latency handling: repeats recorded, report uses median.
+- [x] T3.3 3-repeat latency handling: repeats recorded, report uses median.
 
 ### Phase 4 — smoke then full run (one day)
 
-- [ ] T4.1 Smoke run: every contender on 50 items per suite. Fix everything
+- [x] T4.1 Smoke run: every contender on 50 items per suite. Fix everything
       that breaks. Gate: zero unexplained failures.
-- [ ] T4.2 Full run v1 (no jev): all contenders, all suites, one manifest.
-- [ ] T4.3 Sanity review: baselines beat random; majority matches class
+- [x] T4.2 Full run v1 (no jev): all contenders, all suites, one manifest.
+- [x] T4.3 Sanity review: baselines beat random; majority matches class
       prior; any contender below random triggers an adapter bug hunt before
       results are trusted.
 
 ### Phase 5 — report and publish (half day)
 
-- [ ] T5.1 `report.py`: tables, cardinality plot, reliability diagrams from
+- [x] T5.1 `report.py`: tables, cardinality plot, reliability diagrams from
       the run directory alone.
-- [ ] T5.2 `results/v1.md` + `v1.html`, raw archive.
-- [ ] T5.3 Blog post on nibzard.com: method, tables, caveats, raw-data link.
+- [x] T5.2 `results/v1.md` + `v1.html`, raw archive.
+- [x] T5.3 Blog post on nibzard.com: method, tables, caveats, raw-data link.
       State that jev was not yet available and v1.1 will add it.
+      Done as `blog/v1-post.md` (final, with v1.1 numbers; the v1-without-jev
+      framing lives in the version history and the report pair). Uploading to
+      nibzard.com is a manual step; no site credentials exist in this
+      environment, so it is recorded here rather than claimed.
 
 ### Phase 6 — jev (when the key arrives)
 
-- [ ] T6.1 Live smoke of `jev.py` on 5 items per suite.
-- [ ] T6.2 Full run v1.1 with jev, same items, same protocol.
-- [ ] T6.3 v1.1 report + blog update. The cardinality suite gets the
+- [x] T6.1 Live smoke of `jev.py` on 5 items per suite.
+- [x] T6.2 Full run v1.1 with jev, same items, same protocol.
+- [x] T6.3 v1.1 report + blog update. The cardinality suite gets the
       headline: measured 255 behavior versus the claim.
 
 ## Honesty rules
