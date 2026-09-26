@@ -242,11 +242,15 @@ def _write_run(
         raw = run_dir / "raw" / f"{contender.replace(':', '__')}.{suite_id}.jsonl"
         raw.parent.mkdir(parents=True, exist_ok=True)
         raw.write_text(
-            json.dumps({
-                "item_id": rows[0]["item_id"] if rows else "x",
+            "".join(json.dumps({
+                "item_id": r["item_id"], "repeat": r["repeat"],
                 "attempts": [{"detail": "secret sms text"}],
-                "raw": {"response": {"content": "secret sms text"}},
-            }) + "\n",
+                "raw": {"response": {"content": "secret sms text", "usage": {
+                    "prompt_tokens": r["input_tokens"],
+                    "completion_tokens": r["output_tokens"],
+                    "prompt_tokens_details": {"cached_tokens": 0},
+                }}},
+            }) + "\n" for r in rows),
             encoding="utf-8",
         )
         if attempts is not None and suite_id in attempts:
@@ -483,7 +487,9 @@ def test_cost_marked_incomplete_when_usage_unknown(tmp_path: Path):
     cell = model.cells[("openai:gpt-5.4-nano", "s2_spam")]
     assert cell.cost_incomplete_reason is not None
     assert "usage" in cell.cost_incomplete_reason
-    assert cell.cost_usd == 0.0  # unknown is never a measured zero...
+    assert cell.cost_usd is None  # unavailable usage is not a measured zero
+    assert cell.cost_per_1000 is None
+    assert model.selected_spend_usd is None
 
 
 def test_v1_retried_cost_is_marked_lower_bound(tmp_path: Path):
@@ -568,9 +574,10 @@ def test_render_report_end_to_end(tmp_path: Path):
     with tarfile.open(out / "vtest-raw.tar.gz") as tar:
         s2 = tar.extractfile("vtest/raw/openai__test-model.s2_spam.jsonl")
         assert s2 is not None
-        scrubbed = json.loads(s2.read().decode("utf-8"))
+        scrubbed = json.loads(s2.readline().decode("utf-8"))
         assert "secret sms text" not in json.dumps(scrubbed)
-        assert scrubbed["raw"]["response"]["content"] == "[redacted: s2 license]"
+        assert "raw" not in scrubbed
+        assert scrubbed["publication_redaction"] == "[redacted: S2 publication policy]"
 
 
 def test_render_report_includes_correction_note(tmp_path: Path):
@@ -634,7 +641,7 @@ def test_single_suite_metric_tables_list_only_measured_suites(tmp_path: Path):
     run_dir = _write_run(tmp_path, "vs4", "openai:test-model", suites)
     model = build_report_model([load_run(run_dir)], tmp_path)
     tables = report._metric_tables(model)
-    flip = next(t for t in tables if t[0].startswith("S4 flip rate"))
+    flip = next(t for t in tables if t[0].startswith("S4 overall flip rate"))
     assert flip[1] == ["contender", "S4 order stability"]
     assert all(len(row) == 2 for row in flip[2])
     # No S5 cell exists, so the S5 tables carry no column and are dropped.
