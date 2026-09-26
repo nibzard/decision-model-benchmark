@@ -61,5 +61,5 @@ def sha256_file(path: Path) -> str:
 
 def items_dir(root: Path | None = None) -> Path:
     """Directory holding the frozen suite files: ``data/suites``."""
-    base = root if root is not None else Path(__file__).resolve().parents[2]
+    base = root if root is not None else Path(__file__).resolve().parents[3]
     return base / "data" / "suites"

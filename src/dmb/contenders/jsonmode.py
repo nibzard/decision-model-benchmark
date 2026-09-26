@@ -15,11 +15,21 @@ from __future__ import annotations
 
 import json
 import re
+from threading import local
 from typing import Any
 
 import httpx
 
-from .base import AuthError, Contender, Decision, MalformedReply, RateLimited, TransportError
+from .base import (
+    AuthError,
+    Contender,
+    ContenderError,
+    Decision,
+    MalformedReply,
+    RateLimited,
+    TransportError,
+    negotiate_calls,
+)
 from .render import SYSTEM_PROMPT, render_prompt
 
 TIMEOUT = httpx.Timeout(120.0, connect=15.0)
@@ -51,32 +61,24 @@ class JSONModeContender(Contender):
         self._max_tokens = max_tokens
         self._max_tokens_param = max_tokens_param
         self._extra_body = dict(extra_body or {})
+        self._response_context = local()
         self.notes: list[str] = []
         self._price_name = price_name or name
         self._client = httpx.Client(timeout=TIMEOUT)
 
     # ---- protocol -------------------------------------------------------
 
-    def negotiate(self) -> dict[str, int] | None:
-        """Probe the provider with one cheap call; drop unsupported params.
+    def negotiate(self, before_attempt=None, on_attempt=None) -> dict:
+        return negotiate_calls(self, before_attempt, on_attempt)
 
-        Costs one two-option call. Failures here do not score anything;
-        ``self.notes`` records what was adapted. Returns the probe's
-        reported usage so the runner can bill the negotiation call.
-        """
-        try:
-            decision = self._decide(
-                "Probe: which storage tier does the nightly backup use?",
-                ["cold storage", "hot storage"],
-            )
-        except Exception as exc:  # noqa: BLE001 - negotiation must not crash setup
-            self.notes.append(f"negotiation probe failed: {exc}")
-            return None
-        if decision.input_tokens is None and decision.output_tokens is None:
-            return None
+    def effective_configuration(self) -> dict:
         return {
-            "input_tokens": decision.input_tokens,
-            "output_tokens": decision.output_tokens,
+            "model": self.model,
+            "temperature": self._temperature,
+            "response_format": self._response_format,
+            "max_tokens": self._max_tokens,
+            "max_tokens_param": self._max_tokens_param,
+            "extra_body": dict(self._extra_body),
         }
 
     def _decide(self, state: str, options: list[str]) -> Decision:
@@ -101,7 +103,7 @@ class JSONModeContender(Contender):
         except MalformedReply as exc:
             # The HTTP call succeeded; bill and record its usage even though
             # the reply never became a decision.
-            exc.attach(*openai_style_usage(response), response)
+            exc.attach(*openai_style_usage(response), response, usage_details(response, "openai"))
             raise
         input_tokens, output_tokens = openai_style_usage(response)
         return Decision(
@@ -109,6 +111,7 @@ class JSONModeContender(Contender):
             confidence=confidence,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            usage_details=usage_details(response, "openai"),
             raw={
                 "provider": self.provider,
                 "model": self.model,
@@ -123,8 +126,26 @@ class JSONModeContender(Contender):
 
     # ---- HTTP -----------------------------------------------------------
 
-    def _post(self, body: dict[str, Any]) -> dict[str, Any]:
+    def _post(self, body: dict) -> dict:
+        try:
+            return self._post_response(body)
+        except ContenderError as exc:
+            response = getattr(self._response_context, "response", None)
+            if response is not None:
+                try:
+                    payload = response.json()
+                except ValueError:
+                    payload = None
+                    exc.response = response.text
+                if payload is not None:
+                    exc.attach(
+                        *openai_style_usage(payload), payload, usage_details(payload, "openai")
+                    )
+            raise
+
+    def _post_response(self, body: dict[str, Any]) -> dict[str, Any]:
         """POST and classify failures. Never retries."""
+        self._response_context.response = None
         try:
             response = self._client.post(self.url, headers=self._headers, json=body)
         except httpx.TimeoutException as exc:
@@ -132,6 +153,7 @@ class JSONModeContender(Contender):
         except httpx.HTTPError as exc:
             raise TransportError(f"connection error: {exc}") from exc
 
+        self._response_context.response = response
         if response.status_code == 429:
             retry_after = response.headers.get("retry-after", "?")
             raise RateLimited(f"429 (retry-after: {retry_after})")
@@ -150,6 +172,8 @@ class JSONModeContender(Contender):
 
     def _drop_unsupported(self, parameter: str) -> None:
         """Drop a rejected parameter for the rest of the run."""
+        if not getattr(self, "_negotiating", False):
+            return
         if parameter == "response_format":
             self._response_format = None
             self.notes.append("dropped response_format after provider 400")
@@ -159,9 +183,7 @@ class JSONModeContender(Contender):
         elif parameter == "max_tokens":
             if self._max_tokens_param == "max_tokens":
                 self._max_tokens_param = "max_completion_tokens"
-                self.notes.append(
-                    "renamed max_tokens -> max_completion_tokens after provider 400"
-                )
+                self.notes.append("renamed max_tokens -> max_completion_tokens after provider 400")
             else:
                 self._max_tokens = 10_000  # provider cap; harmless for tiny outputs
                 self.notes.append("raised max token budget after provider 400")
@@ -172,9 +194,7 @@ class JSONModeContender(Contender):
         try:
             choice = response["choices"][0]
             if choice.get("finish_reason") == "length":
-                raise MalformedReply(
-                    "truncated at max_tokens (finish_reason=length)", raw=response
-                )
+                raise MalformedReply("truncated at max_tokens (finish_reason=length)", raw=response)
             message = choice["message"]
             content = message.get("content")
             if content is None and message.get("refusal"):
@@ -182,7 +202,7 @@ class JSONModeContender(Contender):
             if not isinstance(content, str) or not content.strip():
                 raise MalformedReply("empty content", raw=response)
             return content
-        except (KeyError, IndexError, TypeError) as exc:
+        except (KeyError, IndexError, TypeError, AttributeError) as exc:
             raise MalformedReply(f"unexpected response shape: {exc}", raw=response) from exc
 
 
@@ -208,22 +228,60 @@ def _bad_request_error(body: str, dropper: Any) -> Exception:
 # ---- usage extraction ------------------------------------------------------
 
 
-def openai_style_usage(response: dict[str, Any]) -> tuple[int | None, int | None]:
-    """(input, output) tokens from an OpenAI-compatible usage block."""
-    usage = response.get("usage") or {}
-    return usage.get("prompt_tokens"), usage.get("completion_tokens")
+def usage_details(response: Any, style: str = "openai") -> dict[str, Any]:
+    """Preserve provider usage and normalize cache semantics without guessing.
+
+    OpenAI/DeepSeek input totals include cache reads. Anthropic input_tokens
+    exclude separately reported cache reads and writes.
+    """
+    usage = response.get("usage") if isinstance(response, dict) else None
+    if not isinstance(usage, dict):
+        return {}
+    details = dict(usage)
+    details["input_tokens_include_cache"] = style != "anthropic"
+    nested = usage.get("prompt_tokens_details")
+    if isinstance(nested, dict) and "cached_tokens" in nested:
+        details["cache_read_input_tokens"] = nested["cached_tokens"]
+    for key in ("prompt_tokens_details", "input_tokens_details"):
+        nested = usage.get(key)
+        if isinstance(nested, dict):
+            if "cached_tokens" in nested:
+                details["cache_read_input_tokens"] = nested["cached_tokens"]
+            if "cache_write_tokens" in nested:
+                details["cache_write_input_tokens"] = nested["cache_write_tokens"]
+    if "prompt_cache_hit_tokens" in usage:
+        details["cache_read_input_tokens"] = usage["prompt_cache_hit_tokens"]
+    if "cache_read_input_tokens" in usage:
+        details["cache_read_input_tokens"] = usage["cache_read_input_tokens"]
+    if "cache_creation_input_tokens" in usage:
+        details["cache_write_input_tokens"] = usage["cache_creation_input_tokens"]
+    return details
 
 
-def anthropic_usage(response: dict[str, Any]) -> tuple[int | None, int | None]:
-    """(input, output) tokens from an Anthropic messages response."""
-    usage = response.get("usage") or {}
-    return usage.get("input_tokens"), usage.get("output_tokens")
+def _usage_pair(response: Any, input_key: str, output_key: str) -> tuple[int | None, int | None]:
+    usage = response.get("usage") if isinstance(response, dict) else None
+    if not isinstance(usage, dict):
+        return None, None
+
+    def count(key):
+        value = usage.get(key)
+        return (
+            value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+        )
+
+    return count(input_key), count(output_key)
 
 
-def jev_usage(response: dict[str, Any]) -> tuple[int | None, int | None]:
-    """(input, output) tokens from a TypeSafe systemone response."""
-    usage = response.get("usage") or {}
-    return usage.get("input_tokens"), usage.get("output_tokens")
+def openai_style_usage(response: Any) -> tuple[int | None, int | None]:
+    return _usage_pair(response, "prompt_tokens", "completion_tokens")
+
+
+def anthropic_usage(response: Any) -> tuple[int | None, int | None]:
+    return _usage_pair(response, "input_tokens", "output_tokens")
+
+
+def jev_usage(response: Any) -> tuple[int | None, int | None]:
+    return _usage_pair(response, "input_tokens", "output_tokens")
 
 
 # ---- parsing ---------------------------------------------------------------

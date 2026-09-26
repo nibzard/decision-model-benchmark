@@ -149,3 +149,82 @@ def confidence_spread(confidences_by_item: Mapping[str, Sequence[float]]) -> dic
     if not ranges:
         return {"mean_range": float("nan"), "max_range": float("nan")}
     return {"mean_range": float(np.mean(ranges)), "max_range": float(np.max(ranges))}
+
+
+def cluster_mean_interval(
+    values_by_item: Mapping[str, Sequence[float]],
+    *,
+    resamples: int = 2000,
+    seed: int = 20260918,
+) -> dict:
+    """Descriptive percentile bootstrap of equally weighted item means.
+
+    Repeated observations stay inside their item (base item for S4).
+    This describes sampling uncertainty on observed items, not missing
+    responses, dataset shift, or uncertainty about the provider population.
+    A singleton has no estimable sampling interval.
+    """
+    means = np.asarray(
+        [np.mean(values_by_item[key]) for key in sorted(values_by_item) if values_by_item[key]],
+        dtype=float,
+    )
+    result = {
+        "estimate": float(means.mean()) if len(means) else None,
+        "lower": None,
+        "upper": None,
+        "n_clusters": len(means),
+        "resamples": resamples,
+        "seed": seed,
+        "method": "item-cluster percentile bootstrap; equal item weights",
+    }
+    if len(means) >= 2:
+        rng = np.random.default_rng(seed)
+        draws = means[rng.integers(0, len(means), size=(resamples, len(means)))].mean(axis=1)
+        lower, upper = np.percentile(draws, [2.5, 97.5])
+        result.update(lower=float(lower), upper=float(upper))
+    return result
+
+
+def paired_cluster_difference(
+    first: Mapping[str, Sequence[float]],
+    second: Mapping[str, Sequence[float]],
+) -> dict:
+    """First minus second, paired on common items; repeats are not new items."""
+    common = sorted(k for k in first.keys() & second.keys() if first[k] and second[k])
+    differences = {k: [float(np.mean(first[k]) - np.mean(second[k]))] for k in common}
+    return {
+        **cluster_mean_interval(differences),
+        "method": "paired item-cluster percentile bootstrap; equal item weights",
+        "n_first_clusters": sum(bool(v) for v in first.values()),
+        "n_second_clusters": sum(bool(v) for v in second.values()),
+    }
+
+
+def score_risk_coverage(
+    confidences: Sequence[float],
+    corrects: Sequence[bool],
+    denominator: int,
+) -> list[dict]:
+    """Observed error among accepted rows at fixed, unfitted score cutoffs.
+
+    Coverage uses all expected decisions, so failed or unscored decisions
+    cannot disappear from the denominator. These are descriptive curves;
+    selecting deployment cutoffs requires separate held-out validation.
+    """
+    if len(confidences) != len(corrects):
+        raise ValueError("confidences and corrects must have equal length")
+    if denominator < len(confidences):
+        raise ValueError("coverage denominator is smaller than observed scores")
+    out = []
+    for threshold in (0.0, 0.25, 0.5, 0.75, 0.9, 0.95, 1.0):
+        accepted = [c for score, c in zip(confidences, corrects, strict=True) if score >= threshold]
+        out.append(
+            {
+                "threshold": threshold,
+                "accepted": len(accepted),
+                "expected_decisions": denominator,
+                "coverage": len(accepted) / denominator if denominator else None,
+                "risk": 1.0 - sum(accepted) / len(accepted) if accepted else None,
+            }
+        )
+    return out

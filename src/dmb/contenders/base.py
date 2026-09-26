@@ -7,6 +7,8 @@ against the schema fixed in SPEC.md: ``{choice_index: int, confidence: float}``.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from typing import Any
 
@@ -27,6 +29,7 @@ class Decision(BaseModel):
     latency_ms: float = 0.0
     input_tokens: int | None = None
     output_tokens: int | None = None
+    usage_details: dict[str, Any] = Field(default_factory=dict)
     raw: dict[str, Any] = Field(default_factory=dict)
     ok: bool = True
     malformed: bool = False
@@ -50,13 +53,20 @@ class ContenderError(Exception):
         self.input_tokens: int | None = None
         self.output_tokens: int | None = None
         self.response: Any = None
+        self.usage_details: dict[str, Any] = {}
 
-    def attach(self, input_tokens: int | None, output_tokens: int | None,
-               response: Any) -> None:
+    def attach(
+        self,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        response: Any,
+        usage_details: dict[str, Any] | None = None,
+    ) -> None:
         """Record the usage and response of the call that failed."""
         self.input_tokens = input_tokens
         self.output_tokens = output_tokens
         self.response = response
+        self.usage_details = dict(usage_details or {})
         return
 
 
@@ -130,6 +140,14 @@ class Contender:
         """
         return None
 
+    @property
+    def configuration_fingerprint(self) -> str:
+        configuration = self.effective_configuration()
+        return hashlib.sha256(json.dumps(configuration, sort_keys=True).encode()).hexdigest()
+
+    def effective_configuration(self) -> dict[str, Any]:
+        return {"name": self.name, "provider": self.provider}
+
     def close(self) -> None:  # noqa: B027 - optional cleanup
         """Release resources. Default: nothing."""
 
@@ -191,3 +209,75 @@ class MockContender(Contender):
         return reply.model_copy()
 
     _i = 0
+
+
+def negotiate_calls(
+    contender: Contender, before_attempt=None, on_attempt=None, max_attempts: int = 4
+) -> dict[str, Any]:
+    """Bounded setup probes. Callbacks run before/after each started probe.
+
+    before_attempt returns False to stop setup; after_attempt receives the
+    complete attempt record. Only explicit parameter adaptations get a new probe.
+    """
+    if getattr(contender, "_configuration_frozen", False):
+        raise ValueError("configuration already frozen; create a new contender to renegotiate")
+    attempts = []
+    contender._negotiating = True
+    try:
+        for _ in range(max_attempts):
+            if before_attempt is not None and before_attempt() is False:
+                break
+            configuration = contender.effective_configuration()
+            try:
+                decision = contender.decide(
+                    "Probe: which storage tier does the nightly backup use?",
+                    ["cold storage", "hot storage"],
+                )
+                record = {
+                    "ok": True,
+                    "input_tokens": decision.input_tokens,
+                    "output_tokens": decision.output_tokens,
+                    "usage_details": decision.usage_details,
+                    "error": None,
+                    "category": None,
+                    "raw": decision.raw,
+                }
+            except ContenderError as exc:
+                record = {
+                    "ok": False,
+                    "input_tokens": exc.input_tokens,
+                    "output_tokens": exc.output_tokens,
+                    "usage_details": exc.usage_details,
+                    "error": str(exc),
+                    "category": exc.category,
+                    "raw": {
+                        "response": exc.response,
+                        "malformed_payload": getattr(exc, "raw", None),
+                    },
+                }
+                contender.notes.append(f"negotiation probe failed: {exc}")
+            record["effective_configuration"] = configuration
+            attempts.append(record)
+            if on_attempt is not None:
+                on_attempt(record)
+            if record["ok"] or configuration == contender.effective_configuration():
+                break
+    finally:
+        contender._negotiating = False
+        contender._configuration_frozen = True
+    configuration = contender.effective_configuration()
+    totals = {
+        key: sum(a[key] for a in attempts)
+        if attempts and all(a[key] is not None for a in attempts)
+        else None
+        for key in ("input_tokens", "output_tokens")
+    }
+    return {
+        **totals,
+        "usage_details": {},
+        "attempts": attempts,
+        "effective_configuration": configuration,
+        "configuration_fingerprint": hashlib.sha256(
+            json.dumps(configuration, sort_keys=True).encode()
+        ).hexdigest(),
+    }

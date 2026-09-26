@@ -12,11 +12,21 @@ as-served default applied instead.
 from __future__ import annotations
 
 import os
+from threading import local
 
 import httpx
 
-from .base import AuthError, Contender, Decision, MalformedReply, RateLimited, TransportError
-from .jsonmode import anthropic_usage, extract_json_object, validate_decision_dict
+from .base import (
+    AuthError,
+    Contender,
+    ContenderError,
+    Decision,
+    MalformedReply,
+    RateLimited,
+    TransportError,
+    negotiate_calls,
+)
+from .jsonmode import anthropic_usage, extract_json_object, usage_details, validate_decision_dict
 from .render import SYSTEM_PROMPT, render_prompt
 
 TIMEOUT = httpx.Timeout(120.0, connect=15.0)
@@ -67,26 +77,20 @@ class AnthropicContender(Contender):
                 "content-type": "application/json",
             },
         )
+        self._response_context = local()
         self.notes: list[str] = []
         self._text_fallbacks = 0
 
-    def negotiate(self) -> dict[str, int] | None:
-        """Probe with one cheap call; adapt to rejected parameters.
+    def negotiate(self, before_attempt=None, on_attempt=None) -> dict:
+        return negotiate_calls(self, before_attempt, on_attempt)
 
-        Returns the probe's reported usage so the runner can bill the
-        negotiation call.
-        """
-        try:
-            decision = self._decide("Probe: which storage tier does the nightly backup use?",
-                                    ["cold storage", "hot storage"])
-        except Exception as exc:  # noqa: BLE001 - negotiation must not crash setup
-            self.notes.append(f"negotiation probe failed: {exc}")
-            return None
-        if decision.input_tokens is None and decision.output_tokens is None:
-            return None
+    def effective_configuration(self) -> dict:
         return {
-            "input_tokens": decision.input_tokens,
-            "output_tokens": decision.output_tokens,
+            "model": self.model,
+            "temperature": None if getattr(self, "_temperature_off", False) else 0,
+            "thinking": None if getattr(self, "_thinking_off", False) else "disabled",
+            "max_tokens": 4096,
+            "tool_choice": "record_decision",
         }
 
     def _decide(self, state: str, options: list[str]) -> Decision:
@@ -110,14 +114,12 @@ class AnthropicContender(Contender):
                 raise MalformedReply("truncated at max_tokens", raw=response)
             tool_input, source = self._extract_tool_input(response)
             if not isinstance(tool_input, dict):
-                raise MalformedReply(
-                    f"tool input is not an object: {tool_input!r}", raw=response
-                )
+                raise MalformedReply(f"tool input is not an object: {tool_input!r}", raw=response)
             choice_index, confidence = validate_decision_dict(tool_input, len(options))
         except MalformedReply as exc:
             # The HTTP call succeeded; bill and record its usage even though
             # the reply never became a decision.
-            exc.attach(*anthropic_usage(response), response)
+            exc.attach(*anthropic_usage(response), response, usage_details(response, "anthropic"))
             raise
         if source == "text_fallback":
             self._text_fallbacks += 1
@@ -132,6 +134,7 @@ class AnthropicContender(Contender):
             confidence=confidence,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            usage_details=usage_details(response, "anthropic"),
             raw={
                 "provider": "anthropic",
                 "model": self.model,
@@ -144,11 +147,30 @@ class AnthropicContender(Contender):
 
     def _post(self, body: dict) -> dict:
         try:
+            return self._post_response(body)
+        except ContenderError as exc:
+            response = getattr(self._response_context, "response", None)
+            if response is not None:
+                try:
+                    payload = response.json()
+                except ValueError:
+                    payload = None
+                    exc.response = response.text
+                if payload is not None:
+                    exc.attach(
+                        *anthropic_usage(payload), payload, usage_details(payload, "anthropic")
+                    )
+            raise
+
+    def _post_response(self, body: dict) -> dict:
+        self._response_context.response = None
+        try:
             response = self._client.post("/v1/messages", json=body)
         except httpx.TimeoutException as exc:
             raise TransportError(f"timeout: {exc}") from exc
         except httpx.HTTPError as exc:
             raise TransportError(f"connection error: {exc}") from exc
+        self._response_context.response = response
         if response.status_code == 429:
             raise RateLimited(f"429 (retry-after: {response.headers.get('retry-after', '?')})")
         if response.status_code in (401, 403):
@@ -157,11 +179,19 @@ class AnthropicContender(Contender):
             raise TransportError(f"{response.status_code}: {response.text[:300]}")
         if response.status_code == 400:
             lowered = response.text.lower()
-            if "temperature" in lowered and not getattr(self, "_temperature_off", False):
+            if (
+                getattr(self, "_negotiating", False)
+                and "temperature" in lowered
+                and not getattr(self, "_temperature_off", False)
+            ):
                 self._temperature_off = True
                 self.notes.append("dropped temperature=0 after provider 400")
                 raise TransportError(f"400 rejected temperature: {response.text[:300]}")
-            if "thinking" in lowered and not getattr(self, "_thinking_off", False):
+            if (
+                getattr(self, "_negotiating", False)
+                and "thinking" in lowered
+                and not getattr(self, "_thinking_off", False)
+            ):
                 self._thinking_off = True
                 self.notes.append(
                     "dropped thinking=disabled after provider 400; as-served default applies"
@@ -190,7 +220,7 @@ class AnthropicContender(Contender):
                     return block["input"], "tool_use"
                 if block.get("type") == "text" and isinstance(block.get("text"), str):
                     text_blocks.append(block["text"])
-        except (KeyError, TypeError) as exc:
+        except (KeyError, TypeError, AttributeError) as exc:
             raise MalformedReply(f"unexpected response shape: {exc}", raw=response) from exc
         for text in text_blocks:
             try:

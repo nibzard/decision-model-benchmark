@@ -11,7 +11,7 @@
 TypeSafe AI shipped jev with vendor-run claims: 40x–200x faster, ~$0.042/MTok
 input, free output, calibrated confidence, no schema violations, a 255-choice
 cardinality cap. Every number comes from their own evals, and their post
-admits the bias. No independent measurement exists. DMB is that measurement.
+admits the bias. DMB provides an independent measurement of the tested endpoints.
 
 The question DMB answers, narrowly: **for a typed decision (pick one of N
 options, return a calibrated confidence), what do you actually get from each
@@ -39,11 +39,19 @@ model class, not the prompt.
 
 ### B. Constrained LLMs
 
-All run with temperature 0, native structured output where the provider
-offers it, confidence requested in the same schema.
+All use temperature 0 where supported, native structured output where the provider
+offers it, and confidence requested in the same schema. Astra omits temperature
+because its minimum reasoning effort is `low`; Sol, Luna and Terra pin `none`.
 
 | Contender | Key in env | Structured output |
 |---|---|---|
+| `openai:gpt-6-astra` | `OPENAI_API_KEY` | `json_schema`, reasoning `low` |
+| `openai:gpt-6-sol` | `OPENAI_API_KEY` | `json_schema`, reasoning `none` |
+| `openai:gpt-6-luna` | `OPENAI_API_KEY` | `json_schema`, reasoning `none` |
+| `openai:gpt-5.6-terra` | `OPENAI_API_KEY` | `json_schema`, reasoning `none` |
+| `gemini:gemini-3.8-flash` | `GEMINI_API_KEY` | native JSON Schema, thinking `low` |
+| `gemini:gemini-3.5-flash-lite` | `GEMINI_API_KEY` | native JSON Schema, thinking `minimal` |
+| `gemini:gemini-3.1-pro-preview` | `GEMINI_API_KEY` | native JSON Schema, thinking `low`; preview endpoint |
 | `openai:gpt-5.4-nano` | `OPENAI_API_KEY` | `json_schema` |
 | `openai:gpt-5.4-mini` | `OPENAI_API_KEY` | `json_schema` |
 | `anthropic:claude-haiku-4-5` | `ANTHROPIC_AUTH_TOKEN` | forced tool use |
@@ -56,6 +64,14 @@ offers it, confidence requested in the same schema.
 Cerebras matters on purpose: it is the "fast LLM" wing, so the latency story
 is not only jev versus slow reasoning models.
 
+The September 2026 recent-model pilot excludes Astra under a shared $10 cap.
+Its deterministic stratified subset has 256 decisions per model and one repeat.
+It covers each S1 intent, preserves approximately the S2 prior, samples each
+S3 cardinality, keeps all three orders for 15 S4 bases, and includes both S5
+subsets. Frozen sample hashes differ from full-suite hashes: reports are separate,
+and no repeat-stability conclusion follows. `scripts/run_recent_sample.py`
+records selection IDs and original/sample hashes and produces sanitized artifacts.
+
 ### C. Deterministic baselines
 
 | Contender | Purpose |
@@ -66,7 +82,7 @@ is not only jev versus slow reasoning models.
 
 ## Suites
 
-Five suites. Real data where a license permits; seeded synthetic where the
+Five suites. Real data with source attribution; seeded synthetic where the
 point is control. Target 300 items per suite (200 eval + 100 for order
 stability reruns). Items are frozen at release; a release is not a release
 until the item files are hashed into the run manifest.
@@ -94,15 +110,22 @@ how each LLM's accuracy decays as the option list grows.
 
 S1 items rerun with permuted option order (3 permutations). Gold labels map
 through the permutation. Measures flip rate (same item, different option
-position → different choice) and calibration drift. This is the position-bias
-probe; nobody has published it for this model class.
+position → different choice) and calibration drift. The pooled statistic
+combines order changes with repeat variation. v3
+separates within-order repeat disagreement and matched across-order
+disagreement, with counts and missing-data rules. This design does not
+isolate causal position bias.
 
 ### S5 `confidence-honesty` — forced uncertainty (synthetic)
 
 Items with no good option, plus items where the correct option is present but
-underdetermined by the state text. Gold: `confidence ≤ 0.5` behavior. Measures
-whether a contender admits ignorance or bluffs. Calibration metrics here tell
-you whose confidence you can threshold.
+underdetermined by the state text. The prespecified `confidence ≤ 0.5`
+statistic describes low-confidence
+behavior; it is not a gold label for honesty. Report no-good-option
+confidence separately from underdetermined correctness calibration.
+Underdetermined reference answers are randomly planted and unobservable.
+Historical unequal uncertainty prompts and jev native-score semantics
+prevent cross-model honesty conclusions or deployment-threshold claims.
 
 ## Metrics
 
@@ -115,35 +138,39 @@ Per contender, per suite:
 | Malformed rate | Replies that fail schema or bounds after one retry. Denominator: completed decisions. |
 | Failed rate | Rate-limited, transport, provider-rejected, or authentication failures after the protocol retry. Denominator: completed decisions. |
 | Coverage | Completed decisions divided by expected decisions; valid decisions divided by expected decisions. Every cell lists status, stop reason, and source run. |
-| ECE | 10-bin expected calibration error over confidence. |
+| ECE | 10-bin correctness calibration on valid gold-labelled decisions. S5 overall ECE covers only the underdetermined subset; no-good items are reported separately. Native scores carry a semantics qualification. |
 | Brier | On the reported confidence for correctness. |
-| p50 / p95 / p99 latency | Scope named per cell: one request (protocol v1) or the whole decision including retry backoff (protocol v2). |
+| p50 / p95 / p99 latency | Scope named per cell: one request (protocol v1) or the whole decision including retry backoff (protocol v2/v3). |
 | Cost per 1,000 decisions | From provider usage fields, list prices pinned with date. Covers every recorded attempt when the run kept attempt logs; unknown usage is marked unknown, never treated as a measured zero. |
-| Flip rate | S4 only: choice changes under option permutation, mapped through the permutation. |
+| S4 stability | Overall pooled instability, within-order repeat disagreement, and matched across-order disagreement, mapped to option text; counts and missingness reported separately. |
 | Cardinality curve | S3 accuracy and latency versus N. |
 
-Confidence is defined for every contender as the probability that the
-chosen option is correct. Language-model contenders receive this
-definition in the prompt; jev's native confidence field is
+Language-model confidence is prompted as the probability that the
+chosen option is correct. jev's native confidence field is
 provider-defined and is not documented as that probability, so the report
 labels it separately.
 
 ## Protocol
 
-1. Temperature 0 (or provider minimum). No caching. No provider-side
-   response caching claims without the usage proof in the raw log.
+1. Temperature 0 (or provider minimum). No client response cache. Provider
+   prompt caches may apply automatically; full usage fields are retained.
+   Effective configuration is frozen after bounded setup negotiation.
 2. Concurrency capped at 4 per provider; on rate limit, exponential backoff,
    one retry, then the item counts as failed.
 3. One retry on malformed LLM reply (recorded); a second failure counts as
    malformed, not wrong.
 4. Prices live in one table with the date they were checked. Cost is
-   computed from usage, never from estimates. Each run stores a snapshot
-   of the table beside its manifest; reports reprice from that snapshot.
+   computed from usage with explicit completeness and scope. Missing usage
+   or cache rates are unknown. Each run stores the exact snapshot beside
+   its manifest; reports verify its hash and never substitute current
+   rates for historical snapshots. Unpriced models fail before probes.
 5. Every run writes `runs/<id>/manifest.json`: contender versions, item-file
    hashes, price table hash, library versions, wall time, total spend.
    The manifest is replaced atomically and starts in status `running`.
-6. Raw responses are kept in the run directory and published with the
-   report. No cherry-picking; the report is generated, not written.
+6. Full S2 responses stay local. Published S2 observations use an approved
+   metadata allowlist in every archive member, including shared logs,
+   probe logs, errors and reasoning. The report is generated from preserved
+   observations, with no cherry-picking.
 7. A run directory is created exclusively. An existing `runs/<id>` refuses
    a second run with the same ID; nothing is resumed or overwritten.
 8. Stop scopes: a run stop (budget exhaustion, execution failure) halts
@@ -155,9 +182,11 @@ labels it separately.
 9. Every attempt - first tries, retries, malformed replies, and failures -
    is recorded with its own timing, reported usage, and response in
    `raw/<contender>.<suite>.attempts.jsonl`.
-10. Negotiation probe calls are billed separately from scored decisions
-    and reported as negotiation spend. Contenders not selected on the
-    command line are never constructed or probed.
+10. At most four setup probes adapt rejected parameters before scoring.
+    Every started probe, including errors and malformed replies, is recorded
+    and accounted separately. Stop/budget checks run between probes.
+    Decoding parameters never adapt during scored requests. Contenders not
+    selected on the command line are never constructed or probed.
 11. The majority baseline's priors come from fixed source suites
     (`PRIOR_SOURCES` in `baselines.py`): S4 uses the S1 prior so the
     order experiment holds the prior fixed. The manifest records each
@@ -165,7 +194,8 @@ labels it separately.
 
 Run exit codes: `0` complete; `2` usage error (bad run ID, existing run
 directory, no contenders); `3` execution failure; `4` budget stop; `5`
-authentication stop; `6` deadline stop.
+authentication stop; `6` deadline stop; `130` interruption. Interruption
+signals stop, drains started requests and writes terminal status.
 
 ## Report merging
 
@@ -185,7 +215,7 @@ coverage row names its source run.
   usage and retry latency not recorded; macro-F1 over option positions;
   majority prior table built from whatever suites loaded; cost from
   final-attempt usage only.
-- **v2** (this code, run `v2-majority-fix` and later): attempt records
+- **v2** (run `v2-majority-fix`): attempt records
   with per-attempt usage and timing; decision-scope latency including
   retry backoff; macro-F1 over stable option labels with `n/a` where
   positions are not classes; pinned `PRIOR_SOURCES` with recorded
@@ -194,17 +224,25 @@ coverage row names its source run.
   confidence-definition fingerprints in the manifest. The v2 corrections
   and their defect mapping are published as `results/v2/CORRECTIONS.md`.
 
+- **v3** (new executions): full provider/cache usage and explicit cost
+  completeness; auditable bounded setup with frozen configuration and
+  fingerprint; missing-price rejection; stop rechecks after backoff;
+  interrupted terminal manifests and drained started attempts. Reporting
+  corrections apply to historical observations without rewriting their
+  protocol versions. See `results/v3/CORRECTIONS.md`.
+
 ## Report
 
 - `results/vN.md` and a static `results/vN.html`: one table per metric,
    one coverage table, one cardinality plot, one reliability diagram per
    contender. Machine-readable cell metrics sit beside them in
    `results/vN.cells.json`.
-- Raw run directories attached as an archive. S2 item text is scrubbed
-   from every archived file whose name carries the suite - decision logs
-   and attempt logs alike.
+- Sanitized run directories attached as an archive. S2 publishes approved
+   metadata only across all members, independent of filename or nesting.
 - Corrections publish as a new version with a correction note mapping
-   each changed number to its defect; earlier versions stay untouched.
+   each changed number to its defect. Earlier numeric reports retain their
+   values with prominent correction notices; privacy-leaking archives are
+   sanitized in place.
 - Published on nibzard.com with the raw data. The headline number is never a
   single speedup; it is the per-suite table.
 
@@ -231,8 +269,12 @@ Python 3.12, `uv`. Dependencies: `httpx`, `pydantic`, `numpy`. Nothing else.
 
 ## Budget and kill criteria
 
-- Soft cap: $40 total provider spend per release. Hard cap: $60. The runner
-  tracks spend live and aborts at the hard cap.
+- Informational budget target: $40 total provider spend per release.
+  Hard cap: $60 against priced observed usage. Started requests can
+  overshoot before their usage arrives; their results are drained and kept.
+  Failed requests with unreported usage remain an accounting limitation.
+  Successful calls with missing usage or unverifiable cache rates stop
+  further paid work instead of being accounted as measured zero.
 - A contender that cannot finish a suite within 2,000 s wall time is recorded
   as DNF for that suite, with partial results kept.
 - If banking77 or SMS spam licensing cannot be confirmed clean for

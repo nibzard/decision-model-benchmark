@@ -27,19 +27,22 @@ key is absent instead of constructing the contender (SPEC.md T2.5).
 from __future__ import annotations
 
 import os
+from threading import local
 
 import httpx
 
 from .base import (
     AuthError,
     Contender,
+    ContenderError,
     Decision,
     MalformedReply,
     ProviderRejected,
     RateLimited,
     TransportError,
+    negotiate_calls,
 )
-from .jsonmode import jev_usage
+from .jsonmode import jev_usage, usage_details
 from .render import render_jev_instructions, render_jev_state
 
 TIMEOUT = httpx.Timeout(120.0, connect=15.0)
@@ -70,26 +73,14 @@ class JevContender(Contender):
                 "content-type": "application/json",
             },
         )
+        self._response_context = local()
         self.notes: list[str] = []
 
-    def negotiate(self) -> dict[str, int] | None:
-        """Probe with one cheap call; record the observed API surface.
+    def negotiate(self, before_attempt=None, on_attempt=None) -> dict:
+        return negotiate_calls(self, before_attempt, on_attempt)
 
-        Returns the probe's reported usage so the runner can bill the
-        negotiation call.
-        """
-        try:
-            decision = self._decide("Probe: which storage tier does the nightly backup use?",
-                                    ["cold storage", "hot storage"])
-        except Exception as exc:  # noqa: BLE001 - negotiation must not crash setup
-            self.notes.append(f"negotiation probe failed: {exc}")
-            return None
-        if decision.input_tokens is None and decision.output_tokens is None:
-            return None
-        return {
-            "input_tokens": decision.input_tokens,
-            "output_tokens": decision.output_tokens,
-        }
+    def effective_configuration(self) -> dict:
+        return {"model": self.model, "confidence_semantics": "provider-defined confidence"}
 
     def _decide(self, state: str, options: list[str]) -> Decision:
         criteria = {option: option for option in options}
@@ -110,26 +101,22 @@ class JevContender(Contender):
             choice_key = answer["choice"]
             confidence = answer.get("confidence")
             if choice_key not in criteria:
-                raise MalformedReply(
-                    f"choice {choice_key!r} not among criteria keys", raw=response
-                )
+                raise MalformedReply(f"choice {choice_key!r} not among criteria keys", raw=response)
             if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
                 raise MalformedReply(
                     f"confidence missing or not a number: {confidence!r}", raw=response
                 )
             confidence = float(confidence)
             if not 0.0 <= confidence <= 1.0:
-                raise MalformedReply(
-                    f"confidence out of bounds: {confidence}", raw=response
-                )
+                raise MalformedReply(f"confidence out of bounds: {confidence}", raw=response)
         except MalformedReply as exc:
             # The HTTP call succeeded; bill and record its usage even though
             # the reply never became a decision.
-            exc.attach(*jev_usage(response), response)
+            exc.attach(*jev_usage(response), response, usage_details(response, "jev"))
             raise
-        except (KeyError, TypeError) as exc:
+        except (KeyError, TypeError, AttributeError) as exc:
             malformed = MalformedReply(f"unexpected response shape: {exc}", raw=response)
-            malformed.attach(*jev_usage(response), response)
+            malformed.attach(*jev_usage(response), response, usage_details(response, "jev"))
             raise malformed from exc
         input_tokens, output_tokens = jev_usage(response)
         return Decision(
@@ -137,6 +124,7 @@ class JevContender(Contender):
             confidence=confidence,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            usage_details=usage_details(response, "jev"),
             raw={
                 "provider": "typesafe",
                 "model": self.model,
@@ -147,11 +135,28 @@ class JevContender(Contender):
 
     def _post(self, body: dict) -> dict:
         try:
+            return self._post_response(body)
+        except ContenderError as exc:
+            response = getattr(self._response_context, "response", None)
+            if response is not None:
+                try:
+                    payload = response.json()
+                except ValueError:
+                    payload = None
+                    exc.response = response.text
+                if payload is not None:
+                    exc.attach(*jev_usage(payload), payload, usage_details(payload, "jev"))
+            raise
+
+    def _post_response(self, body: dict) -> dict:
+        self._response_context.response = None
+        try:
             response = self._client.post(API_URL, json=body)
         except httpx.TimeoutException as exc:
             raise TransportError(f"timeout: {exc}") from exc
         except httpx.HTTPError as exc:
             raise TransportError(f"connection error: {exc}") from exc
+        self._response_context.response = response
         if response.status_code == 429:
             raise RateLimited(f"429 (retry-after: {response.headers.get('retry-after', '?')})")
         if response.status_code in (401, 403):

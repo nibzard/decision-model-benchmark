@@ -10,11 +10,27 @@ from .jev import JevContender
 from .llm_anthropic import AnthropicContender
 from .llm_cerebras import cerebras_contender
 from .llm_deepseek import deepseek_contender
+from .llm_gemini import GeminiContender
 from .llm_openai import openai_contender
 from .llm_zai import zai_contender
 
 # (registry key, env var, factory)
 LLM_SPECS = [
+    ("openai:gpt-6-luna", "OPENAI_API_KEY", lambda: openai_contender("gpt-6-luna")),
+    ("openai:gpt-6-sol", "OPENAI_API_KEY", lambda: openai_contender("gpt-6-sol")),
+    ("openai:gpt-5.6-terra", "OPENAI_API_KEY", lambda: openai_contender("gpt-5.6-terra")),
+    ("openai:gpt-6-astra", "OPENAI_API_KEY", lambda: openai_contender("gpt-6-astra")),
+    (
+        "gemini:gemini-3.5-flash-lite",
+        "GEMINI_API_KEY",
+        lambda: GeminiContender("gemini-3.5-flash-lite"),
+    ),
+    ("gemini:gemini-3.8-flash", "GEMINI_API_KEY", lambda: GeminiContender("gemini-3.8-flash")),
+    (
+        "gemini:gemini-3.1-pro-preview",
+        "GEMINI_API_KEY",
+        lambda: GeminiContender("gemini-3.1-pro-preview"),
+    ),
     ("openai:gpt-5.4-nano", "OPENAI_API_KEY", lambda: openai_contender("gpt-5.4-nano")),
     ("openai:gpt-5.4-mini", "OPENAI_API_KEY", lambda: openai_contender("gpt-5.4-mini")),
     (
@@ -54,6 +70,7 @@ def build_contenders(
     each live contender's cheap probe call so unsupported parameters drop
     out before scoring starts.
     """
+
     def selected(key: str) -> bool:
         return not wanted or any(w in key for w in wanted)
 
@@ -90,9 +107,7 @@ def build_contenders(
                     negotiation_usage[contender.name] = usage
             contenders.append(contender)
         else:
-            skipped.append(
-                {"contender": "typesafe:jev", "reason": "env TYPESAFE_API_KEY not set"}
-            )
+            skipped.append({"contender": "typesafe:jev", "reason": "env TYPESAFE_API_KEY not set"})
     return contenders, skipped, negotiation_usage
 
 

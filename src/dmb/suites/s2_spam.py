@@ -2,12 +2,11 @@
 
 Real data. Source: SMS Spam Collection v.1, Almeida & Hidalgo (2011),
 distributed via UCI (https://archive.ics.uci.edu/dataset/228).
-License: free for non-commercial research use with citation of Almeida,
-T.A., Hidalgo, J.M.G., Yamakami, A. "Contributions to the Study of SMS
-Spam Filtering" (CEAS 2011). The license does not permit relicensing or
-commercial use, so DMB keeps the item text local: the published raw logs
-redact S2 state text, and the report ships aggregate numbers only
-(SPEC.md kill criterion).
+The current UCI dataset page lists CC BY 4.0. Cite Almeida, T.A., Hidalgo,
+J.M.G., Yamakami, A., "Contributions to the Study of SMS Spam Filtering"
+(CEAS 2011). DMB's publication policy keeps SMS text local: archives publish
+approved numeric metadata only, including for shared result and probe logs.
+This privacy policy does not assert a license prohibition on republication.
 
 300 items, stratified by class at the dataset prior; first 200 tagged
 ``eval``, last 100 ``spare``.
@@ -19,12 +18,11 @@ import random
 import zipfile
 from pathlib import Path
 
-import httpx
-
 from .items import DMB_SEED, DecisionItem
+from .sources import SOURCES, verified_download, verify_bytes
 
 SUITE_ID = "s2-gate-spam"
-URL = "https://archive.ics.uci.edu/ml/machine-learning-databases/00228/smsspamcollection.zip"
+URL = SOURCES["sms_zip"]["url"]
 OPTIONS = ["ham", "spam"]
 N_TOTAL = 300
 
@@ -33,16 +31,16 @@ def download(raw_dir: Path) -> Path:
     """Download and extract the collection; returns the data file path."""
     raw_dir.mkdir(parents=True, exist_ok=True)
     target = raw_dir / "SMSSpamCollection"
-    if not target.exists():
-        zip_path = raw_dir / "smsspamcollection.zip"
-        if not zip_path.exists():
-            with httpx.Client(timeout=60.0, follow_redirects=True) as client:
-                response = client.get(URL)
-                response.raise_for_status()
-                zip_path.write_bytes(response.content)
+    zip_path = verified_download(raw_dir / "smsspamcollection.zip", SOURCES["sms_zip"])
+    if target.exists():
+        verify_bytes(target.read_bytes(), SOURCES["sms_data"]["sha256"], target.name)
+    else:
         with zipfile.ZipFile(zip_path) as archive:
-            member = archive.namelist()[0]
-            target.write_bytes(archive.read(member))
+            member = SOURCES["sms_data"]["member"]
+            if archive.namelist().count(member) != 1:
+                raise ValueError(f"expected exactly one ZIP member {member}")
+            payload = verify_bytes(archive.read(member), SOURCES["sms_data"]["sha256"], member)
+        target.write_bytes(payload)
     return target
 
 

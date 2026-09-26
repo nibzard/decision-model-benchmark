@@ -1,6 +1,6 @@
 """Grid runner: contenders x suites, protocol-frozen execution.
 
-Protocol (SPEC.md, protocol version v2):
+Protocol (SPEC.md, protocol version v3):
 - temperature 0 or provider minimum; no response caching requested.
 - concurrency capped at 4 per provider; each provider runs one cell at a
   time, so at most ``CONCURRENCY`` requests per provider are in flight.
@@ -14,7 +14,8 @@ Protocol (SPEC.md, protocol version v2):
   response, in ``raw/<contender>.<suite>.attempts.jsonl``.
 - decision latency covers the first attempt through the final outcome,
   including retry backoff (``latency_scope: "decision"`` in each row).
-- stop scopes: a run stop (budget exhaustion or an execution failure)
+- stop scopes: a run stop (budget exhaustion, unpriced billed usage,
+  interruption, or an execution failure)
   halts every lane; a provider stop (authentication failure) halts that
   provider's lane; a cell stop (suite wall deadline) ends that cell.
   Stopped cells cancel queued work, then collect and persist every
@@ -32,15 +33,19 @@ until a terminal status is known.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import os
 import platform
+import signal
 import sys
 import threading
 import time
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -58,7 +63,7 @@ from .contenders.base import (
 )
 from .contenders.render import prompt_fingerprint
 from .prices import Price, price_for, prices_table_hash, snapshot_payload
-from .suites.items import DecisionItem, load_items, sha256_file
+from .suites.items import DecisionItem
 
 # Protocol constants.
 CONCURRENCY = 4
@@ -74,8 +79,8 @@ POLL_S = 0.5
 """Wait granularity for in-flight requests; makes deadlines detectable
 even when no request completes."""
 
-PROTOCOL_VERSION = "v2"
-RECORD_FORMAT = "dmb-records-2"
+PROTOCOL_VERSION = "v3"
+RECORD_FORMAT = "dmb-records-3"
 
 # Command-line exit codes, mirrored in README.md.
 EXIT_OK = 0
@@ -84,9 +89,11 @@ EXIT_EXECUTION = 3
 EXIT_BUDGET = 4
 EXIT_AUTH = 5
 EXIT_DEADLINE = 6
+EXIT_INTERRUPTED = 130
 
-# Attempt outcomes that get the single protocol retry.
-_RETRYABLE = {"malformed", "rate_limited", "transport", "error"}
+
+class RunConfigurationError(ValueError):
+    """Invalid or unsafe run configuration, detected before provider calls."""
 
 
 class RunIdError(ValueError):
@@ -97,18 +104,16 @@ def validate_run_id(run_id: str) -> str:
     """Reject run IDs that are not one safe directory name."""
     if not run_id or not run_id.strip():
         raise RunIdError("run ID must not be empty")
+    if any(ord(char) < 32 for char in run_id):
+        raise RunIdError("run ID must not contain control characters")
     if run_id != run_id.strip():
         raise RunIdError(f"run ID {run_id!r} has leading or trailing whitespace")
     if run_id in (".", ".."):
         raise RunIdError(f"run ID {run_id!r} is not a usable directory name")
     if "/" in run_id or "\\" in run_id or os.sep in run_id:
-        raise RunIdError(
-            f"run ID {run_id!r} must be a single directory name, not a path"
-        )
+        raise RunIdError(f"run ID {run_id!r} must be a single directory name, not a path")
     if Path(run_id).is_absolute() or Path(run_id).name != run_id:
-        raise RunIdError(
-            f"run ID {run_id!r} must be a single directory name, not a path"
-        )
+        raise RunIdError(f"run ID {run_id!r} must be a single directory name, not a path")
     return run_id
 
 
@@ -127,8 +132,7 @@ def reserve_run_dir(root: Path, run_id: str) -> Path:
         run_dir.mkdir()
     except FileExistsError as exc:
         raise RunIdError(
-            f"run directory {run_dir} already exists; "
-            "refusing to overwrite it - use a new run ID"
+            f"run directory {run_dir} already exists; refusing to overwrite it - use a new run ID"
         ) from exc
     return run_dir
 
@@ -162,6 +166,8 @@ class AttemptRecord:
     response: Any = None
     """The provider response, when one arrived, for audit. Never headers."""
     request_config: str = PROTOCOL_VERSION
+    usage_details: dict[str, Any] = field(default_factory=dict)
+    configuration_fingerprint: str | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -180,8 +186,10 @@ class AttemptRecord:
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "usage_complete": self.usage_complete,
+            "usage_details": self.usage_details,
             "response": self.response,
             "request_config": self.request_config,
+            "configuration_fingerprint": self.configuration_fingerprint,
         }
 
 
@@ -241,6 +249,7 @@ def execute_attempt(
         attempt_started: tuple[float, float],
         usage: tuple[int | None, int | None],
         response: Any = None,
+        usage_details: dict | None = None,
     ) -> AttemptRecord:
         mono_start, wall_start = attempt_started
         rec = AttemptRecord(
@@ -260,6 +269,8 @@ def execute_attempt(
             output_tokens=usage[1],
             usage_complete=usage[0] is not None and usage[1] is not None,
             response=response,
+            usage_details=usage_details or {},
+            configuration_fingerprint=getattr(contender, "configuration_fingerprint", None),
         )
         attempts.append(rec)
         if on_attempt is not None:
@@ -269,12 +280,13 @@ def execute_attempt(
     def err_usage(exc: ContenderError) -> tuple[int | None, int | None]:
         return exc.input_tokens, exc.output_tokens
 
-    if stop_reason() is not None:
+    reason = stop_reason()
+    if reason is not None:
         return AttemptOutcome(
             decision=None,
             attempts=[],
             elapsed_ms=0.0,
-            skipped_reason=stop_reason(),
+            skipped_reason=reason,
         )
 
     for attempt_no in (1, 2):
@@ -293,13 +305,26 @@ def execute_attempt(
             prior = attempts[-1].outcome if attempts else None
             if prior in ("rate_limited", "transport", "error"):
                 sleep(BACKOFF_BASE_S * 2 ** (attempt_no - 1))
+            reason = stop_reason()
+            if reason is not None:
+                return AttemptOutcome(
+                    decision=_failed_decision(attempts[-1], suppressed=reason),
+                    attempts=attempts,
+                    elapsed_ms=(monotonic() - started) * 1000.0,
+                )
         attempt_started = (monotonic(), time.time())
         try:
             decision = contender.decide(item.state, item.options)
         except AuthError as exc:
             record(
-                attempt_no, "auth", exc.category, str(exc), attempt_started,
-                err_usage(exc), getattr(exc, "response", None),
+                attempt_no,
+                "auth",
+                exc.category,
+                str(exc),
+                attempt_started,
+                err_usage(exc),
+                getattr(exc, "response", None),
+                getattr(exc, "usage_details", {}),
             )
             return AttemptOutcome(
                 decision=_failed_decision(attempts[-1]),
@@ -308,8 +333,14 @@ def execute_attempt(
             )
         except MalformedReply as exc:
             record(
-                attempt_no, "malformed", exc.category, str(exc), attempt_started,
-                err_usage(exc), exc.response if exc.response is not None else exc.raw,
+                attempt_no,
+                "malformed",
+                exc.category,
+                str(exc),
+                attempt_started,
+                err_usage(exc),
+                exc.response if exc.response is not None else exc.raw,
+                getattr(exc, "usage_details", {}),
             )
             if attempt_no == 1:
                 continue  # one retry on malformed, recorded
@@ -320,8 +351,14 @@ def execute_attempt(
             )
         except RateLimited as exc:
             record(
-                attempt_no, "rate_limited", exc.category, str(exc), attempt_started,
-                err_usage(exc), getattr(exc, "response", None),
+                attempt_no,
+                "rate_limited",
+                exc.category,
+                str(exc),
+                attempt_started,
+                err_usage(exc),
+                getattr(exc, "response", None),
+                getattr(exc, "usage_details", {}),
             )
             if attempt_no == 1:
                 continue
@@ -334,8 +371,14 @@ def execute_attempt(
             # A measured outcome (for example jev's 255-choice cap), not a
             # transport fault: no retry, the row records the rejection.
             record(
-                attempt_no, "provider_rejected", exc.category, str(exc), attempt_started,
-                err_usage(exc), getattr(exc, "response", None),
+                attempt_no,
+                "provider_rejected",
+                exc.category,
+                str(exc),
+                attempt_started,
+                err_usage(exc),
+                getattr(exc, "response", None),
+                getattr(exc, "usage_details", {}),
             )
             return AttemptOutcome(
                 decision=_failed_decision(attempts[-1]),
@@ -345,12 +388,13 @@ def execute_attempt(
         except (TransportError, TimeoutError, ContenderError) as exc:
             record(
                 attempt_no,
-                "transport" if isinstance(exc, TransportError) else "error",
-                exc.category,
+                "transport" if isinstance(exc, (TransportError, TimeoutError)) else "error",
+                getattr(exc, "category", "transport"),
                 str(exc),
                 attempt_started,
-                err_usage(exc),
+                (getattr(exc, "input_tokens", None), getattr(exc, "output_tokens", None)),
                 getattr(exc, "response", None),
+                getattr(exc, "usage_details", {}),
             )
             if attempt_no == 1:
                 continue
@@ -367,6 +411,7 @@ def execute_attempt(
             attempt_started,
             (decision.input_tokens, decision.output_tokens),
             decision.raw.get("response"),
+            getattr(decision, "usage_details", {}),
         )
         if attempt_no == 2:
             decision = decision.model_copy(update={"retries": 1})
@@ -399,6 +444,9 @@ def _failed_decision(record: AttemptRecord, suppressed: str | None = None) -> De
         malformed=record.outcome == "malformed",
         error=_clip(detail),
         retries=max(0, record.attempt - 1),
+        input_tokens=record.input_tokens,
+        output_tokens=record.output_tokens,
+        usage_details=record.usage_details,
     )
 
 
@@ -430,6 +478,11 @@ class SpendTracker:
     tokens: dict[str, tuple[int, int]] = field(default_factory=dict)
     unknown_usage: dict[str, int] = field(default_factory=dict)
     known_attempts: int = 0
+    local_contenders: set[str] = field(default_factory=set)
+    budget_spent_usd: float = 0.0
+    incomplete_cost_attempts: dict[str, int] = field(default_factory=dict)
+    accounting_gaps: list[dict] = field(default_factory=list)
+    accounting_blocker: str | None = None
 
     @property
     def spent_usd(self) -> float:
@@ -442,31 +495,56 @@ class SpendTracker:
         output_tokens: int | None,
         *,
         negotiation: bool = False,
+        usage_details: dict | None = None,
+        block_incomplete: bool = False,
     ) -> None:
         """Add one attempt's usage to the running total."""
-        if input_tokens is None or output_tokens is None:
-            with self.lock:
-                self.unknown_usage[contender] = (
-                    self.unknown_usage.get(contender, 0) + 1
-                )
-            return
         with self.lock:
+            local = contender in self.local_contenders
+            if input_tokens is None or output_tokens is None:
+                self.unknown_usage[contender] = self.unknown_usage.get(contender, 0) + 1
             price = self.prices.get(contender)
             if price is None:
+                if not local:
+                    self.accounting_blocker = f"no price entry for {contender}"
                 return
-            cost = price.cost_usd(input_tokens, output_tokens)
+            accounting = price.account_usage(input_tokens, output_tokens, usage_details)
+            cost = accounting.known_cost_usd or 0.0
+            if not accounting.complete and not local:
+                self.incomplete_cost_attempts[contender] = (
+                    self.incomplete_cost_attempts.get(contender, 0) + 1
+                )
+                self.accounting_gaps.append(
+                    {
+                        "contender": contender,
+                        "phase": "negotiation" if negotiation else "decision",
+                        "reason": accounting.reason,
+                    }
+                )
+                if block_incomplete and accounting.budget_estimate_usd is None:
+                    self.accounting_blocker = (
+                        f"cannot enforce hard cap for {contender}: {accounting.reason}"
+                    )
+            self.budget_spent_usd += accounting.budget_estimate_usd or cost
             if negotiation:
                 self.negotiation_spent_usd += cost
             else:
                 self.decision_spent_usd += cost
             self.by_contender[contender] = self.by_contender.get(contender, 0.0) + cost
             in_tok, out_tok = self.tokens.get(contender, (0, 0))
-            self.tokens[contender] = (in_tok + input_tokens, out_tok + output_tokens)
-            self.known_attempts += 1
+            self.tokens[contender] = (in_tok + (input_tokens or 0), out_tok + (output_tokens or 0))
+            self.known_attempts += int(accounting.complete)
 
     def over_hard_cap(self) -> bool:
         with self.lock:
-            return self.spent_usd > self.hard_cap_usd
+            return self.budget_spent_usd >= self.hard_cap_usd
+
+    def check_stop(self, controller: StopController) -> None:
+        """Stop for unbounded billed rates or when priced usage reaches the cap."""
+        if self.accounting_blocker is not None:
+            controller.stop_run("accounting", self.accounting_blocker)
+        elif self.over_hard_cap():
+            controller.budget_stop(self.budget_spent_usd)
 
 
 # ---- stop control -----------------------------------------------------------
@@ -481,15 +559,19 @@ class StopController:
     run_stop: threading.Event = field(default_factory=threading.Event)
     provider_stops: dict[str, threading.Event] = field(default_factory=dict)
     reasons: list[dict] = field(default_factory=list)
+    interrupted: bool = False
+
+    def stopped(self) -> bool:
+        return self.interrupted or self.run_stop.is_set()
 
     def provider_event(self, provider: str) -> threading.Event:
         with self.lock:
             return self.provider_stops.setdefault(provider, threading.Event())
 
     def stop_run(self, scope: str, reason: str) -> None:
-        """Idempotent: the first run stop reason is the one kept."""
+        """Keep the first reason per scope; the first run reason stays primary."""
         with self.lock:
-            if not self.run_stop.is_set():
+            if not any(entry["scope"] == scope for entry in self.reasons):
                 self.reasons.append({"scope": scope, "reason": reason})
             self.run_stop.set()
 
@@ -497,20 +579,18 @@ class StopController:
         event = self.provider_event(provider)
         with self.lock:
             if not event.is_set():
-                self.reasons.append(
-                    {"scope": "provider", "provider": provider, "reason": reason}
-                )
+                self.reasons.append({"scope": "provider", "provider": provider, "reason": reason})
             event.set()
 
     def run_reason(self) -> str | None:
-        if not self.run_stop.is_set():
+        if not self.stopped():
             return None
         with self.lock:
-            run_scopes = {"budget", "execution"}
+            run_scopes = {"budget", "execution", "accounting", "interrupted"}
             for entry in self.reasons:
                 if entry["scope"] in run_scopes:
                     return entry["reason"]
-            return self.reasons[0]["reason"] if self.reasons else "run stopped"
+            return "interrupted by user" if self.interrupted else "run stopped"
 
     def provider_reason(self, provider: str) -> str | None:
         event = self.provider_stops.get(provider)
@@ -529,8 +609,30 @@ class StopController:
     def budget_stop(self, spent: float) -> None:
         self.stop_run(
             "budget",
-            f"hard cap exceeded: ${spent:.2f} > ${self.hard_cap_usd:.2f}",
+            f"hard cap reached: ${spent:.6f} >= ${self.hard_cap_usd:.6f}",
         )
+
+
+@contextmanager
+def _interrupt_stops(controller: StopController):
+    """SIGINT stops scheduling without interrupting a billed HTTP response.
+
+    The handler only assigns a flag: acquiring locks from a signal handler
+    can deadlock. Normal polling records the reason and drains the workers.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.getsignal(signal.SIGINT)
+
+    def interrupt(_signum, _frame):
+        controller.interrupted = True
+
+    signal.signal(signal.SIGINT, interrupt)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
 
 
 # ---- run specification ------------------------------------------------------
@@ -552,10 +654,47 @@ class RunSpec:
     """Cap items per suite (smoke runs). Applies to the first N items."""
     deviations: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
-    negotiation_usage: dict[str, dict[str, int]] = field(default_factory=dict)
+    negotiation_usage: dict[str, dict[str, Any]] = field(default_factory=dict)
     """Probe-call usage per contender, billed as negotiation spend."""
     majority_provenance: dict[str, dict] = field(default_factory=dict)
     """Where each majority prior came from (suite, option, prior, hash)."""
+    negotiate: bool = False
+    """Run setup probes after reservation, pricing validation, and manifest creation."""
+
+
+def validate_spec(spec: RunSpec, *, require_contenders: bool = True) -> None:
+    """Reject invalid denominators, unsafe paths, and disabled budget checks."""
+    validate_run_id(spec.run_id)
+    if not spec.suites or len(spec.suites) != len(set(spec.suites)):
+        raise RunConfigurationError("select at least one suite, without duplicates")
+    for suite in spec.suites:
+        validate_run_id(suite)
+    if (require_contenders and not spec.contenders) or (
+        len({c.name for c in spec.contenders}) != len(spec.contenders)
+    ):
+        raise RunConfigurationError("select at least one contender, without duplicates")
+    for contender in spec.contenders:
+        validate_run_id(contender.name)
+    for name, value in (("repeats", spec.repeats), ("concurrency", spec.concurrency)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise RunConfigurationError(f"{name} must be a positive integer")
+    if spec.concurrency > CONCURRENCY:
+        raise RunConfigurationError(f"concurrency must not exceed {CONCURRENCY}")
+    if spec.item_limit is not None and (
+        isinstance(spec.item_limit, bool)
+        or not isinstance(spec.item_limit, int)
+        or spec.item_limit < 1
+    ):
+        raise RunConfigurationError("item limit must be a positive integer")
+    for name, value in (
+        ("hard cap", spec.hard_cap_usd),
+        ("soft cap", spec.soft_cap_usd),
+        ("suite wall limit", spec.suite_wall_limit_s),
+    ):
+        if not math.isfinite(value) or value < 0:
+            raise RunConfigurationError(f"{name} must be finite and nonnegative")
+    if spec.suite_wall_limit_s == 0:
+        raise RunConfigurationError("suite wall limit must be positive")
 
 
 def _now_iso() -> str:
@@ -563,9 +702,7 @@ def _now_iso() -> str:
 
 
 def _iso(epoch_seconds: float) -> str:
-    return datetime.fromtimestamp(epoch_seconds, tz=UTC).isoformat(
-        timespec="milliseconds"
-    )
+    return datetime.fromtimestamp(epoch_seconds, tz=UTC).isoformat(timespec="milliseconds")
 
 
 # ---- cell execution ---------------------------------------------------------
@@ -593,8 +730,12 @@ class _CellSinks:
 
 
 def _decision_row(
-    spec: RunSpec, contender: Contender, suite_id: str,
-    item: DecisionItem, repeat: int, outcome: AttemptOutcome,
+    spec: RunSpec,
+    contender: Contender,
+    suite_id: str,
+    item: DecisionItem,
+    repeat: int,
+    outcome: AttemptOutcome,
 ) -> dict:
     decision = outcome.decision
     assert decision is not None
@@ -620,12 +761,16 @@ def _decision_row(
         "latency_scope": "decision",
         "input_tokens": decision.input_tokens,
         "output_tokens": decision.output_tokens,
+        "usage_details": getattr(decision, "usage_details", {}),
+        "configuration_fingerprint": getattr(contender, "configuration_fingerprint", None),
         "gold_index": item.gold_index,
     }
 
 
 def _raw_record(
-    item: DecisionItem, repeat: int, outcome: AttemptOutcome,
+    item: DecisionItem,
+    repeat: int,
+    outcome: AttemptOutcome,
 ) -> dict:
     decision = outcome.decision
     assert decision is not None
@@ -649,83 +794,90 @@ def run_cell(
     controller: StopController,
     sinks: _CellSinks,
 ) -> dict:
-    """Run one contender over one suite; return the manifest cell summary.
-
-    Submits at most ``spec.concurrency`` requests at a time. Checks run,
-    provider, and cell stop signals before each submission and retry. On a
-    stop, cancels queued work, then collects and persists every request
-    already running; the original stop reason stands. Rows, attempt
-    records, and raw records are persisted as they complete.
-    """
+    """Run a bounded cell, stop immediately on failure, and drain started work."""
     started = time.monotonic()
     deadline = started + spec.suite_wall_limit_s
     rows = 0
     drained = 0
     execution_failure: str | None = None
+    failure_lock = threading.Lock()
+    deadline_reached = False
     provider_event = controller.provider_event(contender.provider)
 
+    def fail(exc: Exception, context: str) -> None:
+        nonlocal execution_failure
+        detail = f"{context}: {type(exc).__name__}: {exc}"
+        controller.stop_run("execution", detail)
+        with failure_lock:
+            if execution_failure is None:
+                execution_failure = detail
+
     def stop_reason() -> str | None:
-        if controller.run_stop.is_set():
+        nonlocal deadline_reached
+        if controller.stopped():
             return controller.run_reason()
         if provider_event.is_set():
             return controller.provider_reason(contender.provider)
         if time.monotonic() > deadline:
+            deadline_reached = True
             return f"suite wall limit {spec.suite_wall_limit_s:.0f}s exceeded"
         return None
 
     def on_attempt(record: AttemptRecord) -> None:
-        # Account first, then decide on stops: the budget signal reflects
-        # every recorded charge, including this one.
         tracker.record(
-            record.contender, record.input_tokens, record.output_tokens
+            record.contender,
+            record.input_tokens,
+            record.output_tokens,
+            usage_details=record.usage_details,
+            block_incomplete=(record.outcome == "ok" or record.usage_complete),
         )
-        if tracker.over_hard_cap():
-            controller.budget_stop(tracker.spent_usd)
+        tracker.check_stop(controller)
         if record.outcome == "auth":
             controller.stop_provider(
                 record.provider,
                 f"authentication failed for {record.contender}: {record.error}",
             )
-        sinks.write_attempt(record.as_dict())
+        try:
+            sinks.write_attempt(record.as_dict())
+        except Exception as exc:  # noqa: BLE001 - raw decision remains recoverable
+            fail(exc, f"persist attempt for {record.contender} {record.item_id}")
 
     def one(task: tuple[DecisionItem, int]) -> AttemptOutcome:
         item, repeat = task
-        return execute_attempt(
-            contender,
-            item,
-            repeat,
-            run_id=spec.run_id,
-            stop_check=stop_reason,
-            on_attempt=on_attempt,
-        )
+        try:
+            return execute_attempt(
+                contender,
+                item,
+                repeat,
+                run_id=spec.run_id,
+                stop_check=stop_reason,
+                on_attempt=on_attempt,
+            )
+        except Exception as exc:  # noqa: BLE001 - notify other lanes immediately
+            fail(exc, f"execute {contender.name} {suite_id} {item.item_id} repeat {repeat}")
+            raise
 
     def collect(outcome: AttemptOutcome, item: DecisionItem, repeat: int) -> None:
         nonlocal rows
         if outcome.skipped:
             return
-        sinks.write_row(
-            _decision_row(spec, contender, suite_id, item, repeat, outcome)
-        )
-        with sinks.cell_lock:
-            sinks.raw_handle.write(
-                json.dumps(_raw_record(item, repeat, outcome), default=str) + "\n"
-            )
-            sinks.raw_handle.flush()
-        rows += 1
+        # Independent writes allow the raw record to preserve a completed
+        # response even if the shared result stream fails (or conversely).
+        try:
+            sinks.write_row(_decision_row(spec, contender, suite_id, item, repeat, outcome))
+            rows += 1
+        except Exception as exc:  # noqa: BLE001 - drain despite persistence failures
+            fail(exc, f"persist row for {contender.name} {item.item_id}")
+        try:
+            with sinks.cell_lock:
+                sinks.raw_handle.write(
+                    json.dumps(_raw_record(item, repeat, outcome), default=str) + "\n"
+                )
+                sinks.raw_handle.flush()
+        except Exception as exc:  # noqa: BLE001 - retain every other writable record
+            fail(exc, f"persist raw response for {contender.name} {item.item_id}")
 
-    work: deque[tuple[DecisionItem, int]] = deque(
-        (item, repeat) for repeat in range(spec.repeats) for item in items
-    )
-
-    def failure_from_future(future: Future, task: tuple[DecisionItem, int]) -> str:
-        item, repeat = task
-        exc = future.exception()
-        detail = f"{type(exc).__name__}: {exc}" if exc is not None else "unknown"
-        return (
-            f"unexpected failure for {contender.name} {suite_id} "
-            f"{item.item_id} repeat {repeat}: {detail}"
-        )
-
+    work = deque((item, repeat) for repeat in range(spec.repeats) for item in items)
     with ThreadPoolExecutor(max_workers=spec.concurrency) as pool:
         pending: dict[Future, tuple[DecisionItem, int]] = {}
 
@@ -734,58 +886,46 @@ def run_cell(
                 task = work.popleft()
                 pending[pool.submit(one, task)] = task
 
-        fill()
-        while pending:
-            done, _ = wait(pending, timeout=POLL_S, return_when=FIRST_COMPLETED)
-            if not done:
-                if stop_reason() is not None:
-                    break
-                continue
-            for future in done:
-                task = pending.pop(future)
-                if future.exception() is not None:
-                    execution_failure = failure_from_future(future, task)
-                    controller.stop_run("execution", execution_failure)
-                    break
-                collect(future.result(), *task)
-            if execution_failure is not None or stop_reason() is not None:
-                break
-            fill()
-
-        # Drain: cancel work that has not started, then collect every
-        # request already running. Their charges are already recorded.
-        for future in pending:
-            future.cancel()
-        for future, task in pending.items():
+        def finish(future: Future, task: tuple[DecisionItem, int], *, draining=False) -> None:
+            nonlocal drained
             if future.cancelled():
-                continue
+                return
             try:
                 outcome = future.result()
-            except Exception:  # noqa: BLE001 - recorded as execution failure
-                if execution_failure is None:
-                    execution_failure = failure_from_future(future, task)
-                    controller.stop_run("execution", execution_failure)
-                continue
-            drained += 1
+            except Exception as exc:  # noqa: BLE001 - worker already signaled; keep draining
+                fail(exc, f"collect {contender.name} {suite_id} {task[0].item_id}")
+                return
+            if draining and not outcome.skipped:
+                drained += 1
             collect(outcome, *task)
 
-    wall_s = time.monotonic() - started
+        try:
+            fill()
+            while pending:
+                done, _ = wait(pending, timeout=POLL_S, return_when=FIRST_COMPLETED)
+                for future in done:
+                    finish(future, pending.pop(future))
+                if execution_failure is not None or stop_reason() is not None:
+                    break
+                fill()
+        except Exception as exc:  # noqa: BLE001 - scheduler failures also drain
+            fail(exc, f"schedule {contender.name} {suite_id}")
+        finally:
+            for future in pending:
+                future.cancel()
+            for future, task in pending.items():
+                finish(future, task, draining=True)
+
     expected = len(items) * spec.repeats
     if execution_failure is not None:
         status, abort_reason = "failed", execution_failure
-    elif controller.run_stop.is_set():
-        reason = controller.run_reason() or "run stopped"
-        if controller.budget_stopped():
-            status, abort_reason = "budget", reason
-        else:
-            status, abort_reason = "stopped", reason
+    elif controller.stopped():
+        status = "budget" if controller.budget_stopped() else "stopped"
+        abort_reason = controller.run_reason()
     elif provider_event.is_set():
-        status = "auth_error"
-        abort_reason = controller.provider_reason(contender.provider)
-    elif rows < expected:
-        status, abort_reason = "dnf", (
-            f"suite wall limit {spec.suite_wall_limit_s:.0f}s exceeded"
-        )
+        status, abort_reason = "auth_error", controller.provider_reason(contender.provider)
+    elif deadline_reached or rows < expected:
+        status, abort_reason = "dnf", f"suite wall limit {spec.suite_wall_limit_s:.0f}s exceeded"
     else:
         status, abort_reason = "ok", None
     return {
@@ -799,7 +939,7 @@ def run_cell(
         "rows": rows,
         "expected_rows": expected,
         "drained_rows": drained,
-        "wall_s": round(wall_s, 2),
+        "wall_s": round(time.monotonic() - started, 2),
     }
 
 
@@ -825,39 +965,60 @@ class GridState:
     def record_cell(self, cell: dict) -> None:
         with self.lock:
             self.cells.append(cell)
-            self.manifest["cells"] = sorted(
-                self.cells, key=lambda c: (c["contender"], c["suite"])
-            )
+            self.manifest["cells"] = sorted(self.cells, key=lambda c: (c["contender"], c["suite"]))
             self.write_manifest()
 
 
 def run_grid(spec: RunSpec, repo_root: Path | None = None) -> tuple[Path, dict]:
-    """Execute the full grid and write ``runs/<run_id>/`` with a manifest.
-
-    Contenders of one provider run sequentially in a lane; lanes run in
-    parallel. At most ``spec.concurrency`` requests are in flight per
-    provider at any time. Returns ``(run_dir, manifest)``; the manifest's
-    ``status`` and ``exit_code`` fields give the terminal outcome.
-    """
+    """Validate and reserve a run before probes, then execute bounded provider lanes."""
     root = repo_root or Path(__file__).resolve().parents[2]
-    run_dir = reserve_run_dir(root, spec.run_id)
-    results_path = run_dir / "results.jsonl"
-
+    validate_spec(spec)
     prices: dict[str, Price] = {}
+    local_contenders = {
+        c.name for c in spec.contenders if c.provider in {"baseline", "mock", "local"}
+    }
     for contender in spec.contenders:
         try:
             prices[contender.name] = price_for(contender.name)
-        except KeyError:
+        except KeyError as exc:
+            if contender.name not in local_contenders:
+                raise RunConfigurationError(
+                    f"no price entry for paid contender {contender.name}; "
+                    "add a verified price before running it"
+                ) from exc
             spec.notes.append(
-                f"no price entry for {contender.name}; spend not tracked for it"
+                f"no price entry for local contender {contender.name}; no provider spend"
             )
-    tracker = SpendTracker(prices=prices, hard_cap_usd=spec.hard_cap_usd)
-    controller = StopController(hard_cap_usd=spec.hard_cap_usd)
-
+    # Read each suite once. Its digest and every cell use the same bytes,
+    # even if another process rebuilds the source files during the run.
     item_files: dict[str, str] = {}
+    items_by_suite: dict[str, list[DecisionItem]] = {}
     for suite_id in spec.suites:
-        item_files[suite_id] = sha256_file(root / "data" / "suites" / f"{suite_id}.jsonl")
+        path = root / "data" / "suites" / f"{suite_id}.jsonl"
+        try:
+            payload = path.read_bytes()
+            items = [
+                DecisionItem.model_validate_json(line)
+                for line in payload.splitlines()
+                if line.strip()
+            ]
+        except (OSError, ValueError) as exc:
+            raise RunConfigurationError(f"cannot load suite {suite_id}: {exc}") from exc
+        if not items or len({item.item_id for item in items}) != len(items):
+            raise RunConfigurationError(f"suite {suite_id} must contain unique, nonempty items")
+        item_files[suite_id] = hashlib.sha256(payload).hexdigest()
+        items_by_suite[suite_id] = items[: spec.item_limit] if spec.item_limit else items
 
+    run_dir = reserve_run_dir(root, spec.run_id)
+    results_path = run_dir / "results.jsonl"
+    raw_dir = run_dir / "raw"
+    raw_dir.mkdir()
+    tracker = SpendTracker(
+        prices=prices,
+        hard_cap_usd=spec.hard_cap_usd,
+        local_contenders=local_contenders,
+    )
+    controller = StopController(hard_cap_usd=spec.hard_cap_usd)
     manifest = {
         "run_id": spec.run_id,
         "status": "running",
@@ -865,6 +1026,8 @@ def run_grid(spec: RunSpec, repo_root: Path | None = None) -> tuple[Path, dict]:
         "protocol_version": PROTOCOL_VERSION,
         "record_format": RECORD_FORMAT,
         "protocol": {
+            "protocol_version": PROTOCOL_VERSION,
+            "record_format": RECORD_FORMAT,
             "temperature": 0,
             "concurrency_per_provider": spec.concurrency,
             "repeats": spec.repeats,
@@ -875,24 +1038,19 @@ def run_grid(spec: RunSpec, repo_root: Path | None = None) -> tuple[Path, dict]:
             "request_timeout_s": REQUEST_TIMEOUT_S,
             "hard_cap_usd": spec.hard_cap_usd,
             "soft_cap_usd": spec.soft_cap_usd,
+            "soft_cap_policy": "advisory target recorded for review; does not stop scheduling",
             "item_limit": spec.item_limit,
             "latency_scope": "decision",
             "prompt_sha256": prompt_fingerprint(),
+            "budget_scope": "priced known usage plus separately labeled safe estimates; "
+            "unreported usage remains unknown",
         },
         "confidence_definition": (
-            "Confidence is the contender's probability that its chosen option "
-            "is correct. Language-model contenders receive this definition in "
-            "the prompt; jev's native confidence field is provider-defined "
-            "and not documented as that probability."
+            "Language-model contenders are prompted for the probability that their chosen option "
+            "is correct. Jev returns a provider-native confidence score whose probability "
+            "semantics are undocumented; it is not assumed to be a calibrated probability."
         ),
-        "contenders": [
-            {
-                "name": c.name,
-                "provider": c.provider,
-                "notes": list(getattr(c, "notes", [])),
-            }
-            for c in spec.contenders
-        ],
+        "contenders": [],
         "suites": spec.suites,
         "item_files": item_files,
         "majority_prior": spec.majority_provenance,
@@ -905,29 +1063,57 @@ def run_grid(spec: RunSpec, repo_root: Path | None = None) -> tuple[Path, dict]:
         "cells": [],
         "skipped": [],
         "stops": [],
+        "negotiation": {},
+        "spend_usd": 0.0,
+        "decision_spend_usd": 0.0,
+        "negotiation_spend_usd": 0.0,
+        "execution_errors": [],
     }
     (run_dir / "prices.snapshot.json").write_text(
         json.dumps(snapshot_payload(), indent=2) + "\n", encoding="utf-8"
     )
     state = GridState(manifest=manifest, run_dir=run_dir)
+
+    def refresh_accounting() -> None:
+        with tracker.lock:
+            manifest.update(
+                {
+                    "spend_usd": round(tracker.spent_usd, 8),
+                    "decision_spend_usd": round(tracker.decision_spent_usd, 8),
+                    "negotiation_spend_usd": round(tracker.negotiation_spent_usd, 8),
+                    "budget_accounted_usd": round(tracker.budget_spent_usd, 8),
+                    "cost_complete": not tracker.incomplete_cost_attempts,
+                    "spend_by_contender_usd": {
+                        k: round(v, 8) for k, v in tracker.by_contender.items()
+                    },
+                    "tokens_by_contender": {
+                        k: {"input": v[0], "output": v[1]} for k, v in tracker.tokens.items()
+                    },
+                    "unknown_usage_attempts": dict(tracker.unknown_usage),
+                    "incomplete_cost_attempts": dict(tracker.incomplete_cost_attempts),
+                    "accounting_gaps": list(tracker.accounting_gaps),
+                }
+            )
+
+    def refresh_contenders() -> None:
+        manifest["contenders"] = [
+            {
+                "name": c.name,
+                "provider": c.provider,
+                "notes": list(getattr(c, "notes", [])),
+                "effective_configuration": c.effective_configuration(),
+                "configuration_fingerprint": c.configuration_fingerprint,
+            }
+            for c in spec.contenders
+        ]
+
+    refresh_contenders()
     state.write_manifest()
+    results_path.write_text("", encoding="utf-8")
+    lane_errors: list[dict] = []
 
-    for name, usage in spec.negotiation_usage.items():
-        tracker.record(
-            name, usage.get("input_tokens"), usage.get("output_tokens"),
-            negotiation=True,
-        )
-
-    lanes: dict[str, list[Contender]] = {}
-    for contender in spec.contenders:
-        lanes.setdefault(contender.provider, []).append(contender)
-
-    def skipped_cell(
-        contender: Contender, suite_id: str, reason: str, kind: str
-    ) -> dict:
-        items = load_items(root / "data" / "suites" / f"{suite_id}.jsonl")
-        if spec.item_limit is not None:
-            items = items[: spec.item_limit]
+    def blank_cell(contender: Contender, suite_id: str, reason: str, kind: str) -> dict:
+        count = len(items_by_suite[suite_id])
         return {
             "contender": contender.name,
             "provider": contender.provider,
@@ -935,10 +1121,10 @@ def run_grid(spec: RunSpec, repo_root: Path | None = None) -> tuple[Path, dict]:
             "status": "skipped",
             "skip_kind": kind,
             "abort_reason": reason,
-            "items": len(items),
+            "items": count,
             "repeats": spec.repeats,
             "rows": 0,
-            "expected_rows": len(items) * spec.repeats,
+            "expected_rows": count * spec.repeats,
             "drained_rows": 0,
             "wall_s": 0.0,
         }
@@ -947,84 +1133,210 @@ def run_grid(spec: RunSpec, repo_root: Path | None = None) -> tuple[Path, dict]:
         provider_event = controller.provider_event(provider)
         for contender in members:
             for suite_id in spec.suites:
-                if controller.run_stop.is_set():
-                    state.record_cell(skipped_cell(
-                        contender, suite_id,
-                        controller.run_reason() or "run stopped", "run_stop",
-                    ))
-                    continue
-                if provider_event.is_set():
-                    state.record_cell(skipped_cell(
-                        contender, suite_id,
-                        controller.provider_reason(provider) or "provider stopped",
-                        "provider_stop",
-                    ))
-                    continue
-                items = load_items(root / "data" / "suites" / f"{suite_id}.jsonl")
-                if spec.item_limit is not None:
-                    items = items[: spec.item_limit]
-                raw_dir = run_dir / "raw"
-                raw_dir.mkdir(parents=True, exist_ok=True)
-                safe = contender.name.replace(":", "__")
-                with (raw_dir / f"{safe}.{suite_id}.jsonl").open(
-                    "a", encoding="utf-8"
-                ) as raw_handle, (raw_dir / f"{safe}.{suite_id}.attempts.jsonl").open(
-                    "a", encoding="utf-8"
-                ) as attempts_handle, results_path.open("a", encoding="utf-8") as rh:
-                    sinks = _CellSinks(
-                        results_handle=rh,
-                        attempts_handle=attempts_handle,
-                        raw_handle=raw_handle,
-                        state_lock=state.lock,
+                cell = None
+                try:
+                    if controller.stopped():
+                        cell = blank_cell(
+                            contender,
+                            suite_id,
+                            controller.run_reason() or "run stopped",
+                            "run_stop",
+                        )
+                    elif provider_event.is_set():
+                        cell = blank_cell(
+                            contender,
+                            suite_id,
+                            controller.provider_reason(provider) or "provider stopped",
+                            "provider_stop",
+                        )
+                    else:
+                        safe = contender.name.replace(":", "__")
+                        with (
+                            (raw_dir / f"{safe}.{suite_id}.jsonl").open(
+                                "a", encoding="utf-8"
+                            ) as raw_handle,
+                            (raw_dir / f"{safe}.{suite_id}.attempts.jsonl").open(
+                                "a", encoding="utf-8"
+                            ) as attempts_handle,
+                            results_path.open("a", encoding="utf-8") as rh,
+                        ):
+                            cell = run_cell(
+                                contender,
+                                suite_id,
+                                items_by_suite[suite_id],
+                                spec,
+                                tracker,
+                                controller,
+                                _CellSinks(rh, attempts_handle, raw_handle, state.lock),
+                            )
+                    state.record_cell(cell)
+                except Exception as exc:  # noqa: BLE001 - signal before the lane exits
+                    detail = (
+                        f"lane {provider} {contender.name} {suite_id}: {type(exc).__name__}: {exc}"
                     )
-                    cell = run_cell(
-                        contender, suite_id, items, spec, tracker, controller, sinks
-                    )
-                state.record_cell(cell)
+                    controller.stop_run("execution", detail)
+                    if cell is None:
+                        cell = blank_cell(contender, suite_id, detail, "execution")
+                        cell["status"] = "failed"
+                        state.record_cell(cell)
+                    raise
 
-    lane_errors: list[dict] = []
-    with results_path.open("w", encoding="utf-8"), ThreadPoolExecutor(
-        max_workers=max(1, len(lanes))
-    ) as lane_pool:
-        lane_futures = {
-            lane_pool.submit(run_lane, provider, members): provider
-            for provider, members in lanes.items()
+    def negotiate_one(contender: Contender, handle) -> None:
+        counter = 0
+        probe_started = (time.monotonic(), time.time())
+
+        def before_attempt() -> bool:
+            nonlocal probe_started
+            tracker.check_stop(controller)
+            allowed = (
+                not controller.stopped()
+                and not controller.provider_event(contender.provider).is_set()
+            )
+            if allowed:
+                probe_started = (time.monotonic(), time.time())
+            return allowed
+
+        def on_attempt(record: dict) -> None:
+            nonlocal counter
+            counter += 1
+            input_tokens, output_tokens = record.get("input_tokens"), record.get("output_tokens")
+            tracker.record(
+                contender.name,
+                input_tokens,
+                output_tokens,
+                negotiation=True,
+                usage_details=record.get("usage_details"),
+                block_incomplete=(
+                    record.get("ok", True)
+                    or (input_tokens is not None and output_tokens is not None)
+                ),
+            )
+            tracker.check_stop(controller)
+            if record.get("category") == "auth":
+                controller.stop_provider(
+                    contender.provider, f"authentication failed for {contender.name}"
+                )
+            payload = {
+                **record,
+                "run_id": spec.run_id,
+                "contender": contender.name,
+                "provider": contender.provider,
+                "phase": "negotiation",
+                "attempt": counter,
+                "started_at": _iso(probe_started[1]),
+                "elapsed_ms": round((time.monotonic() - probe_started[0]) * 1000, 3),
+                "usage_complete": input_tokens is not None and output_tokens is not None,
+                "request_config": PROTOCOL_VERSION,
+            }
+            configuration = record.get("effective_configuration")
+            if configuration is not None:
+                payload["configuration_fingerprint"] = hashlib.sha256(
+                    json.dumps(configuration, sort_keys=True).encode()
+                ).hexdigest()
+            handle.write(json.dumps(payload, default=str) + "\n")
+            handle.flush()
+            refresh_accounting()
+            state.write_manifest()
+
+        # Compatibility for callers with already-observed setup usage;
+        # new CLI runs always negotiate inside this reserved lifecycle.
+        existing = spec.negotiation_usage.get(contender.name)
+        if existing:
+            for record in existing.get("attempts", [existing]):
+                on_attempt(record)
+        if not spec.negotiate or type(contender).negotiate is Contender.negotiate:
+            return
+        if not before_attempt():
+            return
+        result = contender.negotiate(before_attempt=before_attempt, on_attempt=on_attempt)
+        manifest["negotiation"][contender.name] = {
+            key: value for key, value in (result or {}).items() if key != "attempts"
         }
-        for future in lane_futures:
+        manifest["negotiation"][contender.name]["attempt_count"] = counter
+        refresh_contenders()
+        state.write_manifest()
+
+    def negotiate_all() -> None:
+        with (raw_dir / "negotiation.attempts.jsonl").open("a", encoding="utf-8") as handle:
+            for contender in spec.contenders:
+                negotiate_one(contender, handle)
+
+    lanes: dict[str, list[Contender]] = {}
+    for contender in spec.contenders:
+        lanes.setdefault(contender.provider, []).append(contender)
+
+    with _interrupt_stops(controller):
+        try:
+            tracker.check_stop(controller)
+            negotiate_all()
+        except KeyboardInterrupt:
+            controller.interrupted = True
+        except Exception as exc:  # noqa: BLE001 - setup has already been reserved
+            detail = f"setup failed: {type(exc).__name__}: {exc}"
+            lane_errors.append({"provider": "setup", "error": detail})
+            controller.stop_run("execution", detail)
+        tracker.check_stop(controller)
+        with ThreadPoolExecutor(max_workers=max(1, len(lanes))) as lane_pool:
+            pending = {}
             try:
-                future.result()
-            except Exception as exc:  # noqa: BLE001 - lane failure stops the run
-                provider = lane_futures[future]
-                detail = f"lane {provider} failed: {type(exc).__name__}: {exc}"
-                lane_errors.append({"provider": provider, "error": detail})
+                for provider, members in lanes.items():
+                    pending[lane_pool.submit(run_lane, provider, members)] = provider
+            except KeyboardInterrupt:
+                controller.interrupted = True
+            except Exception as exc:  # noqa: BLE001 - stop existing lanes if submission fails
+                detail = f"start provider lane failed: {type(exc).__name__}: {exc}"
+                lane_errors.append({"provider": "scheduler", "error": detail})
                 controller.stop_run("execution", detail)
+            while pending:
+                try:
+                    done, _ = wait(pending, timeout=POLL_S, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        provider = pending.pop(future)
+                        try:
+                            future.result()
+                        except Exception as exc:  # noqa: BLE001 - failures signaled in lane
+                            detail = f"lane {provider} failed: {type(exc).__name__}: {exc}"
+                            lane_errors.append({"provider": provider, "error": detail})
+                            controller.stop_run("execution", detail)
+                except KeyboardInterrupt:
+                    controller.interrupted = True
+                    # Stay inside the executor lifetime: workers see the flag
+                    # before scheduling another call, and their responses drain.
+        if controller.interrupted:
+            controller.stop_run("interrupted", "interrupted by user")
 
-    manifest["finished_at"] = _now_iso()
-    manifest["stops"] = controller.reasons
-    manifest["execution_errors"] = lane_errors
-    manifest["spend_usd"] = round(tracker.spent_usd, 4)
-    manifest["decision_spend_usd"] = round(tracker.decision_spent_usd, 4)
-    manifest["negotiation_spend_usd"] = round(tracker.negotiation_spent_usd, 4)
-    manifest["spend_by_contender_usd"] = {
-        k: round(v, 4) for k, v in tracker.by_contender.items()
-    }
-    manifest["tokens_by_contender"] = {
-        k: {"input": v[0], "output": v[1]} for k, v in tracker.tokens.items()
-    }
-    manifest["unknown_usage_attempts"] = dict(tracker.unknown_usage)
-    manifest["total_cell_wall_s"] = round(
-        sum(c.get("wall_s", 0.0) for c in state.cells), 2
-    )
-    if controller.budget_stopped():
-        manifest["budget_overshoot_usd"] = round(
-            tracker.spent_usd - spec.hard_cap_usd, 4
+        # A lane can fail before describing its later cells. Keep their expected
+        # denominators visible even when output/manifest persistence was interrupted.
+        recorded = {(cell["contender"], cell["suite"]) for cell in state.cells}
+        for contender in spec.contenders:
+            for suite_id in spec.suites:
+                if (contender.name, suite_id) not in recorded:
+                    state.record_cell(
+                        blank_cell(
+                            contender,
+                            suite_id,
+                            controller.run_reason() or "execution stopped",
+                            "run_stop",
+                        )
+                    )
+        refresh_contenders()
+        refresh_accounting()
+        manifest.update(
+            {
+                "finished_at": _now_iso(),
+                "stops": list(controller.reasons),
+                "execution_errors": lane_errors,
+                "interrupted": controller.interrupted,
+                "total_cell_wall_s": round(sum(c.get("wall_s", 0.0) for c in state.cells), 2),
+            }
         )
-
-    status, exit_code = _terminal_status(manifest)
-    manifest["status"] = status
-    manifest["exit_code"] = exit_code
-    state.write_manifest()
-    return run_dir, manifest
+        if controller.budget_stopped():
+            manifest["budget_overshoot_usd"] = round(
+                max(0.0, tracker.spent_usd - spec.hard_cap_usd), 8
+            )
+        manifest["status"], manifest["exit_code"] = _terminal_status(manifest)
+        state.write_manifest()
+        return run_dir, manifest
 
 
 def _terminal_status(manifest: dict) -> tuple[str, int]:
@@ -1034,6 +1346,10 @@ def _terminal_status(manifest: dict) -> tuple[str, int]:
     ):
         return "failed", EXIT_EXECUTION
     reasons = manifest.get("stops", [])
+    if manifest.get("interrupted") or any(r["scope"] == "interrupted" for r in reasons):
+        return "interrupted", EXIT_INTERRUPTED
+    if any(r["scope"] == "accounting" for r in reasons):
+        return "stopped_accounting", EXIT_BUDGET
     if any(r["scope"] == "budget" for r in reasons):
         return "stopped_budget", EXIT_BUDGET
     if any(

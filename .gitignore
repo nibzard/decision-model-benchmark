@@ -1,6 +1,7 @@
 # DMB gitignore - item data and run outputs stay out of git
 data/
 runs/
+.benchmark-studies/
 __pycache__/
 *.pyc
 .venv/
