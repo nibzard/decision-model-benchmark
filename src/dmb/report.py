@@ -649,6 +649,8 @@ def aggregate_cell(
     if manifest_cell is not None:
         cell.status = manifest_cell.get("status", "ok")
         cell.stop_reason = manifest_cell.get("abort_reason")
+        if suite_id == "s2_spam" and cell.stop_reason:
+            cell.stop_reason = "recorded stop; diagnostic omitted by S2 publication policy"
         expected = manifest_cell.get("expected_rows")
         if expected is not None and (type(expected) is not int or expected < 0):
             raise MergeError("manifest expected_rows must be a nonnegative integer")
@@ -838,11 +840,10 @@ def _order_stability(
     within, across = [], []
     missing_within = missing_across = 0
     within_base_flips = set()
-    for base, ids in sorted(by_base.items()):
+    eligible = {base: ids for base, ids in by_base.items() if len(ids) >= 2 and len(repeats) >= 2}
+    matched = min(len(repeats), min(map(len, eligible.values()))) if eligible else 0
+    for base, ids in sorted(eligible.items()):
         ids = sorted(ids)
-        matched = min(len(ids), len(repeats))
-        if matched < 2:
-            continue
         # All blocks have matched observations; deterministic lexicographic
         # subsampling avoids choosing a convenient response after scoring.
         for item_id in ids:
@@ -869,9 +870,9 @@ def _order_stability(
         "across_order_missing_blocks": missing_across,
         "within_order_flipped_bases": len(within_base_flips),
         "total_base_items": len(by_base),
-        "observations_per_block": min(len(repeats), min(map(len, by_base.values())))
-        if by_base
-        else 0,
+        "eligible_base_items": len(eligible),
+        "excluded_base_items": len(by_base) - len(eligible),
+        "observations_per_block": matched,
         "policy": "complete blocks only; equal observations per block; fixed repeat pairing",
     }
 
@@ -2017,12 +2018,23 @@ def build_report_model(
     protocol_notes: list[str] = []
     spend = 0.0
     for run in runs:
-        deviations.extend(run.manifest.get("deviations", []))
-        notes.extend(f"[{run.run_id}] {n}" for n in run.manifest.get("notes", []))
-        for contender in run.manifest.get("contenders", []):
-            for note in contender.get("notes", []):
-                notes.append(f"[{run.run_id}] {contender['name']}: {note}")
-        skipped.extend(run.manifest.get("skipped", []))
+        licensed = "s2_spam" in run.manifest.get("item_files", {})
+        if licensed:
+            notes.append(
+                f"[{run.run_id}] Free-text provider/run diagnostics are omitted by S2 "
+                "publication policy; structured protocol and configuration metadata remain."
+            )
+            skipped.extend(
+                dict(entry, reason="recorded skip; diagnostic omitted by S2 publication policy")
+                for entry in run.manifest.get("skipped", [])
+            )
+        else:
+            deviations.extend(run.manifest.get("deviations", []))
+            notes.extend(f"[{run.run_id}] {n}" for n in run.manifest.get("notes", []))
+            for contender in run.manifest.get("contenders", []):
+                for note in contender.get("notes", []):
+                    notes.append(f"[{run.run_id}] {contender['name']}: {note}")
+            skipped.extend(run.manifest.get("skipped", []))
         spend += run.manifest.get("spend_usd", 0.0)
 
     if allow_protocol_mix:
