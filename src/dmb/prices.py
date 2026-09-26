@@ -92,7 +92,9 @@ class Price:
         )
 
 
-# Verified 2026-09-18. Sources: provider pricing pages and announcements
+# Base prices originally verified 2026-09-18; OpenAI/Anthropic cache reads
+# reverified 2026-09-26. Cache write TTL and historical prices are unknown.
+# Sources: provider pricing pages and announcements
 # (see each entry). Notes: DeepSeek shows peak pricing (off-peak is half);
 # the Anthropic models are reached through a gateway here, so billed rates
 # may differ from Anthropic list prices.
@@ -102,32 +104,36 @@ PRICES: tuple[Price, ...] = (
         "gpt-5.4-nano",
         0.20,
         1.25,
-        "2026-09-18",
-        "https://developers.openai.com/pricing",
+        "2026-09-26",
+        "https://developers.openai.com/api/docs/models/gpt-5.4-nano",
+        cache_read_per_mtok=0.02,
     ),
     Price(
         "openai:gpt-5.4-mini",
         "gpt-5.4-mini",
         0.75,
         4.50,
-        "2026-09-18",
-        "https://developers.openai.com/pricing",
+        "2026-09-26",
+        "https://developers.openai.com/api/docs/models/gpt-5.4-mini",
+        cache_read_per_mtok=0.075,
     ),
     Price(
         "anthropic:claude-haiku-4-5",
         "claude-haiku-4-5",
         1.00,
         5.00,
-        "2026-09-18",
-        "https://www.anthropic.com/pricing (list; via gateway)",
+        "2026-09-26",
+        "https://platform.claude.com/docs/en/about-claude/pricing (list; gateway bill unknown)",
+        cache_read_per_mtok=0.1,
     ),
     Price(
         "anthropic:claude-sonnet-4-6",
         "claude-sonnet-4-6",
         3.00,
         15.00,
-        "2026-09-18",
-        "https://www.anthropic.com/pricing (list; via gateway)",
+        "2026-09-26",
+        "https://platform.claude.com/docs/en/about-claude/pricing (list; gateway bill unknown)",
+        cache_read_per_mtok=0.3,
     ),
     Price("zai:glm-5.3-flash", "glm-5.3-flash", 0.15, 0.50, "2026-09-18", "https://z.ai/pricing"),
     Price("zai:glm-5.3", "glm-5.3", 1.40, 4.40, "2026-09-18", "https://z.ai/pricing"),

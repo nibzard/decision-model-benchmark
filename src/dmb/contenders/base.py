@@ -250,7 +250,10 @@ def negotiate_calls(
                     "usage_details": exc.usage_details,
                     "error": str(exc),
                     "category": exc.category,
-                    "raw": {"response": exc.response},
+                    "raw": {
+                        "response": exc.response,
+                        "malformed_payload": getattr(exc, "raw", None),
+                    },
                 }
                 contender.notes.append(f"negotiation probe failed: {exc}")
             record["effective_configuration"] = configuration

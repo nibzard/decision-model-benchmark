@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+from threading import local
 from typing import Any
 
 import httpx
@@ -60,6 +61,7 @@ class JSONModeContender(Contender):
         self._max_tokens = max_tokens
         self._max_tokens_param = max_tokens_param
         self._extra_body = dict(extra_body or {})
+        self._response_context = local()
         self.notes: list[str] = []
         self._price_name = price_name or name
         self._client = httpx.Client(timeout=TIMEOUT)
@@ -128,12 +130,13 @@ class JSONModeContender(Contender):
         try:
             return self._post_response(body)
         except ContenderError as exc:
-            response = getattr(self, "_last_http_response", None)
+            response = getattr(self._response_context, "response", None)
             if response is not None:
                 try:
                     payload = response.json()
                 except ValueError:
                     payload = None
+                    exc.response = response.text
                 if payload is not None:
                     exc.attach(
                         *openai_style_usage(payload), payload, usage_details(payload, "openai")
@@ -142,7 +145,7 @@ class JSONModeContender(Contender):
 
     def _post_response(self, body: dict[str, Any]) -> dict[str, Any]:
         """POST and classify failures. Never retries."""
-        self._last_http_response = None
+        self._response_context.response = None
         try:
             response = self._client.post(self.url, headers=self._headers, json=body)
         except httpx.TimeoutException as exc:
@@ -150,7 +153,7 @@ class JSONModeContender(Contender):
         except httpx.HTTPError as exc:
             raise TransportError(f"connection error: {exc}") from exc
 
-        self._last_http_response = response
+        self._response_context.response = response
         if response.status_code == 429:
             retry_after = response.headers.get("retry-after", "?")
             raise RateLimited(f"429 (retry-after: {retry_after})")
