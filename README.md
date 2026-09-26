@@ -78,8 +78,10 @@ all probe outcomes and usage are recorded, and effective configuration
 is frozen before scoring. Every scored attempt retains provider usage,
 including cache fields. An unknown rate or usage component is reported
 explicitly; it cannot contribute a fictitious measured zero to the budget.
-The default soft cap is $40 and hard cap $60. A request already in flight
-can complete after a stop; its result and usage are retained.
+The $40 budget target is informational; the $60 hard cap applies to
+priced observed usage. Requests already in flight can overshoot the cap
+and complete after a stop; their results and usage are retained. Failed
+requests with unreported usage remain an explicit accounting limitation.
 
 Run IDs are new directory names. Existing run directories are never
 resumed or overwritten. Exit codes are 0 complete, 2 invalid configuration

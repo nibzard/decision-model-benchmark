@@ -94,7 +94,8 @@ how each LLM's accuracy decays as the option list grows.
 
 S1 items rerun with permuted option order (3 permutations). Gold labels map
 through the permutation. Measures flip rate (same item, different option
-position → different choice) and calibration drift. The pooled statistic combines order changes with repeat variation. v3
+position → different choice) and calibration drift. The pooled statistic
+combines order changes with repeat variation. v3
 separates within-order repeat disagreement and matched across-order
 disagreement, with counts and missing-data rules. This design does not
 isolate causal position bias.
@@ -102,7 +103,8 @@ isolate causal position bias.
 ### S5 `confidence-honesty` — forced uncertainty (synthetic)
 
 Items with no good option, plus items where the correct option is present but
-underdetermined by the state text. The prespecified `confidence ≤ 0.5` statistic describes low-confidence
+underdetermined by the state text. The prespecified `confidence ≤ 0.5`
+statistic describes low-confidence
 behavior; it is not a gold label for honesty. Report no-good-option
 confidence separately from underdetermined correctness calibration.
 Underdetermined reference answers are randomly planted and unobservable.
@@ -122,7 +124,7 @@ Per contender, per suite:
 | Coverage | Completed decisions divided by expected decisions; valid decisions divided by expected decisions. Every cell lists status, stop reason, and source run. |
 | ECE | 10-bin correctness calibration on valid gold-labelled decisions. S5 overall ECE covers only the underdetermined subset; no-good items are reported separately. Native scores carry a semantics qualification. |
 | Brier | On the reported confidence for correctness. |
-| p50 / p95 / p99 latency | Scope named per cell: one request (protocol v1) or the whole decision including retry backoff (protocol v2). |
+| p50 / p95 / p99 latency | Scope named per cell: one request (protocol v1) or the whole decision including retry backoff (protocol v2/v3). |
 | Cost per 1,000 decisions | From provider usage fields, list prices pinned with date. Covers every recorded attempt when the run kept attempt logs; unknown usage is marked unknown, never treated as a measured zero. |
 | S4 stability | Overall pooled instability, within-order repeat disagreement, and matched across-order disagreement, mapped to option text; counts and missingness reported separately. |
 | Cardinality curve | S3 accuracy and latency versus N. |
@@ -167,8 +169,8 @@ labels it separately.
 10. At most four setup probes adapt rejected parameters before scoring.
     Every started probe, including errors and malformed replies, is recorded
     and accounted separately. Stop/budget checks run between probes.
-    Decoding parameters never adapt during scored requests. Contenders not selected on the
-    command line are never constructed or probed.
+    Decoding parameters never adapt during scored requests. Contenders not
+    selected on the command line are never constructed or probed.
 11. The majority baseline's priors come from fixed source suites
     (`PRIOR_SOURCES` in `baselines.py`): S4 uses the S1 prior so the
     order experiment holds the prior fixed. The manifest records each
@@ -251,8 +253,12 @@ Python 3.12, `uv`. Dependencies: `httpx`, `pydantic`, `numpy`. Nothing else.
 
 ## Budget and kill criteria
 
-- Soft cap: $40 total provider spend per release. Hard cap: $60. The runner
-  tracks spend live and aborts at the hard cap.
+- Informational budget target: $40 total provider spend per release.
+  Hard cap: $60 against priced observed usage. Started requests can
+  overshoot before their usage arrives; their results are drained and kept.
+  Failed requests with unreported usage remain an accounting limitation.
+  Successful calls with missing usage or unverifiable cache rates stop
+  further paid work instead of being accounted as measured zero.
 - A contender that cannot finish a suite within 2,000 s wall time is recorded
   as DNF for that suite, with partial results kept.
 - If banking77 or SMS spam licensing cannot be confirmed clean for

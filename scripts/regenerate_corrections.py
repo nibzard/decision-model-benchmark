@@ -156,7 +156,9 @@ def regenerate(root: Path = ROOT) -> dict:
         "source_runs": ["v1", "v1.1", "v2-majority-fix"],
         "source_price_snapshot_sha256": snapshot_hash(historical_payload),
     }
-    (root / "results/v3/observations-preserved.json").write_text(json.dumps(proof, indent=2) + "\n")
+    (root / "results/v3/observations-preserved.json").write_text(
+        json.dumps(proof, sort_keys=True, indent=2) + "\n"
+    )
     print(
         "Regenerated v3; sanitized all three historical archives; numeric observations unchanged."
     )
