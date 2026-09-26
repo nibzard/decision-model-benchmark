@@ -11,23 +11,20 @@ import os
 
 import httpx
 
+from ..prices import price_for
 from .jsonmode import JSONModeContender
 
 BASE_URL = "https://api.cerebras.ai/v1/chat/completions"
 
 # Preferred open models in order; first available wins.
-PREFERRED_MODELS = [
-    "llama-3.3-70b",
-    "llama3.1-8b",
-    "qwen-3-32b",
-    "gpt-oss-120b",
-]
+PREFERRED_MODELS = ["gpt-oss-120b"]
 
 
 def resolve_model() -> str:
     """Resolve the Cerebras model from env or the account's model list."""
     env_model = os.environ.get("CEREBRAS_MODEL")
     if env_model:
+        price_for(f"cerebras:{env_model}")
         return env_model
     try:
         response = httpx.get(
@@ -36,15 +33,13 @@ def resolve_model() -> str:
             timeout=15.0,
         )
         response.raise_for_status()
-        available = {
-            model["id"] for model in response.json().get("data", [])
-        }
-    except (httpx.HTTPError, ValueError, KeyError):
+        available = {model["id"] for model in response.json().get("data", [])}
+    except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
         return PREFERRED_MODELS[0]
     for candidate in PREFERRED_MODELS:
         if candidate in available:
             return candidate
-    return sorted(available)[0] if available else PREFERRED_MODELS[0]
+    raise ValueError("Cerebras account has no model with a verified price")
 
 
 def cerebras_contender() -> JSONModeContender:
