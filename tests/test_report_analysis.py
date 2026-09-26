@@ -2,7 +2,11 @@
 
 import hashlib
 import json
+import os
+import subprocess
+import sys
 import tarfile
+from pathlib import Path
 
 import pytest
 
@@ -321,3 +325,39 @@ def test_rendered_s2_report_never_publishes_free_text_diagnostics(tmp_path):
     assert sentinel not in report.render_md(model)
     assert sentinel not in report.render_html(model, report._metric_tables(model))
     assert sentinel not in json.dumps(model.json_summary())
+
+
+def test_report_artifacts_are_identical_across_fresh_hash_seeds(tmp_path):
+    suites = {
+        suite: [_row("i2", suite, 1, 0.85, 1), _row("i1", suite, 0, 0.75, 0)]
+        for suite in ("s1_intent77", "s2_spam", "s3_cardinality", "s4_order")
+    }
+    _write_run(tmp_path, "source", "openai:gpt-5.4-nano", suites)
+    script = (
+        "from pathlib import Path; import sys; from dmb.report import render_report; "
+        "render_report(Path(sys.argv[1])/'runs/source', Path(sys.argv[2]), name='stable')"
+    )
+    outputs = []
+    for seed in ("1", "207"):
+        out = tmp_path / f"output-{seed}"
+        env = dict(
+            os.environ,
+            PYTHONHASHSEED=seed,
+            PYTHONPATH=str(Path(report.__file__).resolve().parents[1]),
+        )
+        subprocess.run(
+            [sys.executable, "-B", "-c", script, str(tmp_path), str(out)],
+            env=env,
+            check=True,
+            capture_output=True,
+        )
+        outputs.append({path.name: path.read_bytes() for path in out.iterdir()})
+    assert outputs[0] == outputs[1]
+
+
+def test_reliability_confidence_sum_is_order_invariant():
+    rows = [
+        _row(str(i), "s1_intent77", 0, confidence, 0)
+        for i, confidence in enumerate([0.71] * 101 + [0.8] * 99)
+    ]
+    assert report.reliability_bins(rows) == report.reliability_bins(list(reversed(rows)))
