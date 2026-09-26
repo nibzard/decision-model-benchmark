@@ -20,37 +20,20 @@ import csv
 import random
 from pathlib import Path
 
-import httpx
-
 from .items import DMB_SEED, DecisionItem
+from .sources import SOURCES, verified_download
 
 SUITE_ID = "s1-intent-77"
-DATA_URL = (
-    "https://raw.githubusercontent.com/PolyAI-LDN/task-specific-datasets/"
-    "master/banking_data/train.csv"
-)
-LICENSE_URL = (
-    "https://raw.githubusercontent.com/PolyAI-LDN/task-specific-datasets/"
-    "master/LICENSE"
-)
+DATA_URL = SOURCES["banking77_csv"]["url"]
+LICENSE_URL = SOURCES["banking77_license"]["url"]
 N_TOTAL = 300
 
 
 def download(raw_dir: Path) -> tuple[Path, list[str]]:
     """Download train.csv plus its LICENSE; returns (csv path, labels)."""
     raw_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = raw_dir / "banking77-train.csv"
-    if not csv_path.exists():
-        with httpx.Client(timeout=60.0, follow_redirects=True) as client:
-            response = client.get(DATA_URL)
-            response.raise_for_status()
-            csv_path.write_bytes(response.content)
-            try:
-                license_response = client.get(LICENSE_URL)
-                if license_response.status_code == 200:
-                    (raw_dir / "banking77-LICENSE").write_bytes(license_response.content)
-            except httpx.HTTPError:
-                pass  # license text stays absent; recorded in data/LICENSES.md
+    csv_path = verified_download(raw_dir / "banking77-train.csv", SOURCES["banking77_csv"])
+    verified_download(raw_dir / "banking77-LICENSE", SOURCES["banking77_license"])
     labels: list[str] = []
     with csv_path.open(newline="", encoding="utf-8") as handle:
         for row in csv.DictReader(handle):

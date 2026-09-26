@@ -1,162 +1,119 @@
 # DMB — decision-model benchmark
 
-One narrow question: for a typed decision — pick one of N options and
-state a calibrated confidence — what does each model class actually
-deliver, at what latency, cost, and failure rate?
+DMB measures typed choices: pick one of N options and return a confidence
+score. It compares jev, eight constrained LLM configurations, and three
+deterministic baselines across five suites. The results describe these
+endpoints, prompts, and datasets; they do not establish a winning model class.
 
-This repository answers it with an independent, reproducible
-measurement. Three contender classes run under one frozen protocol:
-jev (TypeSafe AI's "System One" decision model), eight constrained
-LLMs across five providers, and three deterministic baselines. Five
-suites, 60 cells, $28.34 of measured provider spend, every raw log
-published. No vendor sponsorship; costs are paid, listed, and dated.
+The [v3 report](results/v3/v3.md) is the report of record. Its
+[correction note](results/v3/CORRECTIONS.md) explains the corrected S4/S5
+interpretations, historical cost limitations, and archive sanitization.
+Machine-readable metrics, paired item-cluster uncertainty, descriptive
+risk/coverage curves, plots, and sanitized observations live in
+[results/v3](results/v3/).
 
-## What it found
+## Findings supported by the historical observations
 
-| Contender | S1 banking 77-way | S2 spam | S3 code word | S4 permuted | Cost / 1k (S1) | p50 latency |
-|---|---|---|---|---|---|---|
-| jev | 76.3% | 93.0% | 100% to N=255, fails at 256+ | 76.7% | $0.07 | 264-276 ms |
-| glm-5.3 | 80.4% | 94.9% | 100% | 82.0% | $2.42 | 2.4-5.6 s |
-| glm-5.3-flash | 79.0% | 91.4% | 100% | 82.4% | $0.21 | 2.0-3.5 s |
-| gpt-oss-120b (Cerebras) | 81.3% | 73.0% | 99.6% | 82.3% | $0.32 | 303-346 ms |
-| deepseek-chat | 76.2% | 75.9% | 100% | 75.1% | $0.27 | 731-776 ms |
-| claude-haiku-4.5 | 75.7% | 76.3% | 100% | 79.6% | $0.82 | 2.4-4.4 s |
-| claude-sonnet-4.6 | 74.8% | 77.7% | 100% | 79.2% | $2.48 | 1.8-2.6 s |
-| gpt-5.4-mini | 74.0% | 66.1% | 99.8% | 73.1% | $0.69 | 660-710 ms |
-| gpt-5.4-nano | 70.9% | 67.3% | 93.2% | 68.6% | $0.19 | 684-782 ms |
-| keyword baseline | 29.3% | 54.0% | 100% | 38.0% | $0.00 | 0 ms |
-| majority baseline | 1.3% | 87.7% | 8.0% | 1.0% | $0.00 | 0 ms |
-| random baseline | 1.7% | 53.7% | 5.5% | 2.7% | $0.00 | 0 ms |
+- Banking accuracy ranges from 70.9% to 81.3% among the LLM endpoints;
+  jev scores 76.3%. On spam, glm-5.3 leads at 94.9%, followed by jev
+  at 93.0% and glm-5.3-flash at 91.4%.
+- jev's measured median request latency is 264–276 ms across suites.
+  Cerebras gpt-oss-120b is close at 303–346 ms. These measurements do
+  not substantiate a general 40–200× speed claim.
+- jev succeeds on the planted code-word task through 255 choices and
+  rejects requests at 256, 384, and 512 choices. Every tested LLM
+  endpoint produces valid decisions with 512 choices.
+- Historical pooled S4 instability is 13% for jev and 37% for mini.
+  That statistic combines repeat variability and option permutations.
+  Identical-order repeats also change on 5% and 25% of base items,
+  respectively. v3 reports these effects separately; this experiment
+  does not isolate a causal position bias.
+- S5 confidence differs across endpoints, but historical prompts gave
+  unequal uncertainty instructions and jev's score is provider-defined.
+  The original “only jev bluffs” verdict was unsupported. The reported
+  ECE 0.246 concerns the underdetermined half, whose reference answer
+  was randomly planted; it excludes no-good-option items.
+- The original nominal S1 cost ratio of nano to jev is about 2.49×,
+  using unrounded values. Exact historical bills are unknown: retry
+  usage is incomplete and snapshots omit cache rates. v3 distinguishes
+  known cost subtotals from historical nominal calculations. jev's
+  price remains a vendor claim, and gateway invoices were not reconciled.
 
-Latency covers one request for these (v1) cells. Cost cells whose run
-hit a retry are lower bounds; the reports mark them with `†`. The full
-tables — coverage, calibration, macro-F1, flip rate, per-attempt logs —
-are in [`results/v2/v2.md`](results/v2/v2.md), the corrected report of
-record.
+![Accuracy and latency versus option count](results/v3/cardinality.svg)
 
-- **No class wins on quality.** The best banking-intent scores belong
-  to gpt-oss-120b (81.3%) and glm-5.3 (80.4%); jev lands mid-pack
-  (76.3%). On spam the GLM models lead (94.9%, 91.4%); two OpenAI
-  models sit below the 87.7% majority baseline.
-- **Fastest measured — not 40-200x.** jev's p50 is 264-276 ms, flat
-  from 2 to 255 options: 1.2x faster than gpt-oss-120b on Cerebras,
-  10-16x faster than the thinking-mode models. The vendor's speedup
-  claim holds only against LLMs left in their slowest default mode.
-- **The 255-choice cap is real and sharp.** At 254 and 255 options jev
-  answers with 100% accuracy. At 256, 384, and 512 it rejects the
-  request: `400 Too many choices.` Every LLM handles 512 options.
-- **Only jev bluffs.** On forced-uncertainty items, every LLM admits
-  ignorance on 97.3-100% of them. jev admits on 49.7%, with the worst
-  calibration error measured (ECE 0.246; the LLMs range 0.039-0.122).
-- **Position bias is a measurable axis.** Rerun the same items with
-  permuted option order: jev changes 13% of its choices, the worst LLM
-  37%. Vendor evaluations do not measure this.
-- **Cheapest by ten times.** $0.07 per 1,000 decisions on the banking
-  suite; the cheapest LLM costs $0.19.
+## Reproduce the published correction without paid calls
 
-![Accuracy and latency versus option count, all contenders](results/v2/cardinality.svg)
-
-## Where everything lives
-
-- [`SPEC.md`](SPEC.md) — full design: contenders, suites, metrics,
-  protocol, budget, and the protocol history (v1 versus v2).
-- [`results/v2/`](results/v2/) — corrected report: `v2.md`, `v2.html`,
-  `v2.cells.json` (machine-readable), plots, the scrubbed raw archive,
-  and [`CORRECTIONS.md`](results/v2/CORRECTIONS.md), which maps every
-  corrected number to the defect that produced the old one.
-- `results/v1*`, `results/v1.1*` — original releases, unchanged.
-- [`blog/v1-post.md`](blog/v1-post.md) — the post drafted for
-  nibzard.com; it quotes the corrected numbers.
-- `src/dmb/` — adapters for every contender, the runner, the metrics,
-  and the report generator. `tests/` — 143 tests, no network needed.
-
-## Reproduce it
-
-You need Python 3.12, `uv`, and API keys for the contenders you want
-(`OPENAI_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ZAI_API_KEY`,
-`DEEPSEEK_API_KEY`, `CEREBRAS_API_KEY`, `TYPESAFE_API_KEY` for jev).
-Missing keys skip that contender and record the skip.
-
-1. Clone and install: `uv sync`.
-1. Build the suite items: `uv run dmb build`. Item files download,
-   build, and hash; they rebuild byte-identical from the pinned seed.
-   Compare your hashes against the published manifests.
-1. Smoke run: `uv run dmb run --run-id smoke --smoke` — 50 items per
-   suite, one repeat, every available contender.
-1. Report: `uv run dmb report runs/smoke --out results`.
-1. Tests: `uv run pytest`.
-
-The full grid is `uv run dmb run --run-id v3`. Budget it first: the
-published v1 grid cost $28.14; the soft cap is $40 and the runner
-aborts at a $60 hard cap.
-
-## Run IDs and exit codes
-
-A run ID is one directory name: no slashes, no `.`, and not empty. The
-runner reserves `runs/<id>` exclusively at start. If the directory
-exists, the run refuses to start with exit code 2 — nothing is resumed,
-merged, or overwritten. Use a new run ID and let the report merge cells.
-
-`dmb run` exits 0 for a complete run. Exit 2 is a usage error: an
-invalid or taken run ID, or no contenders available. Exit 3 is an
-execution failure, 4 a budget stop, 5 an authentication stop, and 6 a
-deadline stop. A stopped or failed run keeps its partial results, its
-attempt logs, and a terminal manifest status.
-
-## Merging runs in a report
-
-`dmb report` verifies every supplied run before combining anything:
-item-file hashes must match each manifest, conflicting hashes for one
-suite are rejected, and rows are validated against the frozen items.
-Later runs replace earlier cells whole — a later failed cell replaces
-an earlier success instead of falling back to it. Every coverage row
-names its source run. Runs whose protocol versions differ are rejected
-unless you pass `--allow-protocol-mix`; the report then records the
-mix visibly.
-
-The corrected v2 report was produced with:
+Python 3.12 and `uv` are required.
 
 ```bash
-uv run dmb run --run-id v2-majority-fix --suites s1_intent77,s4_order \
-  --contenders baseline:majority --repeats 3 --no-negotiate
-uv run dmb report runs/v1 --extra runs/v1.1 --extra runs/v2-majority-fix \
-  --allow-protocol-mix --correction-note results/v2/CORRECTIONS.md \
-  --name v2 --out results/v2
+uv sync --locked
+uv run dmb build
+uv run python scripts/regenerate_corrections.py
+uv run pytest
+uv run ruff check .
 ```
 
-## What each command writes
+Input downloads are pinned by exact checksums, including cached bytes.
+Banking77 is pinned to a complete repository commit containing its license.
+All five released item hashes match the rebuilt files. The correction
+script reads the three published archives, checks source snapshots and
+numeric observations, regenerates v3, and sanitizes every archive. It
+makes no provider calls.
 
-- `data/suites/*.jsonl` — frozen items plus `hashes.json`; byte-identical
-  on rebuild (pinned seed).
-- `runs/<id>/manifest.json` — protocol, item-file hashes, price-table
-  hash, library versions, spend, per-cell status, deviations, skips.
-- `runs/<id>/prices.snapshot.json` — the exact price table the run was
-  billed against; reports reprice from it.
-- `runs/<id>/results.jsonl` — one row per item per repeat.
-- `runs/<id>/raw/*.jsonl` — full attempt logs with provider responses,
-  plus one attempt record per request in `*.attempts.jsonl`.
-- `results/<name>.md`, `results/<name>.html` — generated report; never
-  hand-edited.
-- `results/<name>-raw.tar.gz` — raw archive; SMS spam state text is
-  scrubbed (that license does not cover republication).
+## Run a new benchmark
 
-## Honesty rules
+Set keys for the selected contenders: `OPENAI_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN`, `ZAI_API_KEY`, `DEEPSEEK_API_KEY`,
+`CEREBRAS_API_KEY`, and `TYPESAFE_API_KEY`. Missing keys cause recorded
+skips. Cerebras defaults to the priced `gpt-oss-120b`; an explicitly
+selected unpriced model fails before setup calls.
 
-1. No vendor sponsorship. Costs are paid, listed, and dated.
-1. The protocol is frozen before the full run. Deviations are recorded
-   in the manifest, not edited silently.
-1. Negative results ship. A contender that loses stays in the table.
-1. Raw logs publish with the report. Anyone can recompute every number.
-1. Unknown usage is never reported as a measured zero. Cost cells mark
-   what their number covers and what is missing.
+```bash
+uv run dmb run --run-id smoke --smoke
+uv run dmb report runs/smoke --out results/smoke
+```
 
-## Data sources
+New runs use protocol v3. Setup probes have a bounded negotiation phase;
+all probe outcomes and usage are recorded, and effective configuration
+is frozen before scoring. Every scored attempt retains provider usage,
+including cache fields. An unknown rate or usage component is reported
+explicitly; it cannot contribute a fictitious measured zero to the budget.
+The default soft cap is $40 and hard cap $60. A request already in flight
+can complete after a stop; its result and usage are retained.
 
-- S1 banking77 — PolyAI banking77 dataset, CC BY 4.0.
-- S2 SMS spam — UCI SMS Spam Collection; item text stays local and is
-  scrubbed from every published archive.
-- S3, S4, S5 — synthetic, seeded, rebuilt byte-identical from source.
+Run IDs are new directory names. Existing run directories are never
+resumed or overwritten. Exit codes are 0 complete, 2 invalid configuration
+or run ID, 3 execution failure, 4 budget/accounting stop, 5 authentication stop,
+6 deadline stop, and 130 interruption. Partial runs retain terminal
+manifests and all started attempts.
 
-jev stayed out of the first published release (v1) and landed in v1.1.
-The v2 report corrects the defects listed in
-[`results/v2/CORRECTIONS.md`](results/v2/CORRECTIONS.md).
+## Files and provenance
+
+- [SPEC.md](SPEC.md): suites, metrics, execution rules, and protocol history.
+- `data/suites/*.jsonl`, `hashes.json`: rebuilt items and source checksums.
+- `runs/<id>/manifest.json`: protocol, effective settings, hashes, status,
+  coverage, accounting, deviations, and skips.
+- `runs/<id>/prices.snapshot.json`: exact dated price table, verified by hash.
+- `runs/<id>/results.jsonl`, `raw/*.jsonl`: local results and attempt/probe logs.
+- [results/v3](results/v3/): generated corrected report and sanitized archive.
+- `results/v1*`, `results/v1.1*`, `results/v2`: historical numeric reports
+  retained with correction notices. Their archives have been sanitized.
+- [blog/v1-post.md](blog/v1-post.md): revised narrative; publishing is manual.
+
+Reports validate items, rows, price snapshots, and protocol provenance
+before merging. Later runs replace earlier cells whole, including failed
+cells. Protocol mixing requires `--allow-protocol-mix` and is visible.
+
+## Data and publication policy
+
+S1 and S4 use Banking77 under CC BY 4.0 with attribution; S4 is a
+permutation derivative of S1. The [UCI SMS Spam Collection page](https://archive.ics.uci.edu/dataset/228/sms+spam+collection)
+currently lists CC BY 4.0. DMB nevertheless keeps SMS message text local
+as its privacy policy. Published S2 records contain approved metadata
+only, including shared logs, errors, reasoning, and probe files. S3 and
+S5 are generated from seed 20260918.
+
+No vendor sponsorship. Negative results and missing measurements remain
+visible. Descriptive confidence curves do not select a deployment
+threshold: select thresholds on separate held-out data and report the
+resulting coverage and error rate.

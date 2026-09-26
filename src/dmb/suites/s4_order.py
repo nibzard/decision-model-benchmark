@@ -6,7 +6,11 @@ permutation: for permutation ``p`` (new position -> old position),
 ``new_gold = p.index(old_gold)``. The permutation itself is stored in
 ``meta.perm`` so any choice can be mapped back to the original option.
 
-This suite measures flip rate (same item, different option positions,
+Banking77-derived text retains S1's CC BY 4.0 attribution.
+
+This suite measures overall stability (including repeat variability),
+within-order repeat disagreement, and matched across-order disagreement.
+The historical pooled statistic measures flip rate (same item, different option positions,
 different choice) and confidence drift. Items must be built after S1.
 """
 
