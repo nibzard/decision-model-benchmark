@@ -412,7 +412,7 @@ def test_later_failed_cell_does_not_fall_back_to_earlier_success(tmp_path: Path)
     assert cell.n_rows == 0
     assert cell.accuracy is None  # no fallback to the v1 score
     assert cell.status == "stopped"
-    assert cell.stop_reason == "hard cap exceeded"
+    assert cell.stop_reason == "recorded stop; diagnostic omitted by S2 publication policy"
     assert cell.completion_coverage == 0.0
     assert cell.partial is True
 
@@ -546,7 +546,7 @@ def test_partial_cells_starred_and_failed_cells_listed(tmp_path: Path):
     md = (out / "part.md").read_text(encoding="utf-8")
     assert "100.0*" in md  # accuracy starred: partial coverage
     assert "50.0" in md  # completion coverage 1 of 2
-    assert "hard cap exceeded" in md  # stop reason visible
+    assert "recorded stop" in md  # free-text S2 diagnostics never publish
 
 
 # ---- rendering and archive ---------------------------------------------------
@@ -564,7 +564,7 @@ def test_render_report_end_to_end(tmp_path: Path):
     md = (out / "vtest.md").read_text(encoding="utf-8")
     html_out = (out / "vtest.html").read_text(encoding="utf-8")
     assert "openai:test-model" in md
-    assert "test deviation" in md
+    assert "structured protocol and configuration metadata" in md
     assert "<table>" in html_out and "<svg" in html_out
     assert (out / "cardinality.svg").exists()
     assert (out / "reliability-openai__test-model.svg").exists()

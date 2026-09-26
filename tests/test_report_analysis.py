@@ -126,6 +126,42 @@ def test_s4_separates_repeat_changes_and_reports_missing_blocks():
     assert cell.order_stability["within_order_complete_blocks"] == 2
 
 
+def test_s4_capped_run_uses_eligible_bases_for_block_size(tmp_path):
+    items = {
+        f"{base}-p{p}": DecisionItem(
+            item_id=f"{base}-p{p}",
+            suite="s4_order",
+            state="x",
+            options=["a", "b"],
+            gold_index=0,
+            base_item_id=base,
+            meta={"perm": [0, 1]},
+        )
+        for base in ("a", "b")
+        for p in range(3)
+    }
+    rows = [
+        dict(_row(item, "s4_order", 0, 0.8, 0), repeat=repeat)
+        for item in list(items)[:4]
+        for repeat in range(2)
+    ]
+    run = report.RunData("smoke", tmp_path, {"protocol": {"item_limit": 4, "repeats": 2}}, rows)
+    manifest_cell = {"expected_rows": 8}
+    selected = report.SelectedCell(run, manifest_cell, rows)
+    cell = aggregate_cell(
+        "openai:test-model", "s4_order", rows, items, manifest_cell=manifest_cell, selected=selected
+    )
+    assert cell.order_stability["observations_per_block"] == 2
+    assert cell.order_stability["total_base_items"] == 2
+    assert cell.order_stability["eligible_base_items"] == 1
+    assert cell.order_stability["excluded_base_items"] == 1
+    assert cell.order_stability["within_order_complete_blocks"] == 3
+    assert cell.order_stability["across_order_complete_blocks"] == 2
+    empty = report._order_stability(rows[:1], dict(list(items.items())[:1]), expected_repeats=2)
+    assert empty["observations_per_block"] == 0
+    assert empty["within_order_flip_rate"] is None
+
+
 def test_s5_no_good_diagnostics_are_separate_and_native_score_is_labeled():
     rows = [
         _row("s5-ng-001", "s5_confidence", 0, 0.8, -1),
@@ -271,3 +307,17 @@ def test_archive_preserves_anthropic_exclusive_cache_semantics(tmp_path):
         saved = json.load(tar.extractfile(f"run/raw/{path.name}"))
     assert saved["usage_details"]["input_tokens_include_cache"] is False
     assert saved["suite"] == "s2-gate-spam"
+
+
+def test_rendered_s2_report_never_publishes_free_text_diagnostics(tmp_path):
+    name = "openai:gpt-5.4-nano"
+    run = load_run(_write_run(tmp_path, "a", name, _one_suite_rows()))
+    sentinel = "SENSITIVE PROVIDER ECHO OF SMS"
+    run.manifest.update(
+        notes=[sentinel], deviations=[sentinel], skipped=[{"contender": name, "reason": sentinel}]
+    )
+    run.manifest["cells"][0]["abort_reason"] = sentinel
+    model = build_report_model([run], tmp_path)
+    assert sentinel not in report.render_md(model)
+    assert sentinel not in report.render_html(model, report._metric_tables(model))
+    assert sentinel not in json.dumps(model.json_summary())
