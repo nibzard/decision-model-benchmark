@@ -412,8 +412,10 @@ def select_cells(runs: list[RunData]) -> dict[tuple[str, str], SelectedCell]:
         rows_by_cell: dict[tuple[str, str], list[dict]] = {}
         for row in run.rows:
             rows_by_cell.setdefault((row.get("contender"), row.get("suite")), []).append(row)
-        for key in set(manifest_cells) | set(rows_by_cell):
-            rows = rows_by_cell.get(key, [])
+        for key in sorted(set(manifest_cells) | set(rows_by_cell)):
+            rows = sorted(
+                rows_by_cell.get(key, []), key=lambda row: (row["item_id"], row["repeat"])
+            )
             seen: set[tuple[str, int]] = set()
             for row in rows:
                 row_key = (row.get("item_id"), row.get("repeat"))
@@ -424,7 +426,7 @@ def select_cells(runs: list[RunData]) -> dict[tuple[str, str], SelectedCell]:
                     )
                 seen.add(row_key)
             selection[key] = SelectedCell(run=run, manifest_cell=manifest_cells.get(key), rows=rows)
-    return selection
+    return dict(sorted(selection.items()))
 
 
 # ---- aggregation -----------------------------------------------------------
@@ -584,7 +586,7 @@ def _account_records(
             known_costs.append(amount)
         if not account.complete:
             reasons.add(account.reason or "unknown usage charge")
-    return (sum(known_costs) if known_costs else None, len(records), sorted(reasons))
+    return (math.fsum(known_costs) if known_costs else None, len(records), sorted(reasons))
 
 
 def _legacy_cost_rows(selected: SelectedCell, contender: str, suite_id: str) -> list[dict]:
@@ -781,7 +783,7 @@ def aggregate_cell(
     no_good = [r for r in ok_rows if r["gold_index"] < 0]
     if no_good:
         cell.admits_ignorance = sum(1 for r in no_good if r["confidence"] <= 0.5) / len(no_good)
-        cell.mean_conf_no_good = sum(r["confidence"] for r in no_good) / len(no_good)
+        cell.mean_conf_no_good = math.fsum(r["confidence"] for r in no_good) / len(no_good)
 
     if suite_id == "s5_confidence":
         cell.calibration_subset = "underdetermined only (legacy ECE/Brier fields)"
@@ -1103,12 +1105,12 @@ def reliability_svg(name: str, bins: list[dict]) -> str:
 def reliability_bins(rows: list[dict]) -> list[dict]:
     """10 reliability bins over valid scored rows."""
     scored = [r for r in rows if r["ok"] and r["gold_index"] >= 0]
-    bins = [{"lo": i / 10, "n": 0, "conf_sum": 0.0, "acc_sum": 0} for i in range(10)]
+    bins = [{"lo": i / 10, "n": 0, "confidences": [], "acc_sum": 0} for i in range(10)]
     for r in scored:
         conf = min(max(r["confidence"], 0.0), 1.0)
         idx = int(np.searchsorted(np.linspace(0.0, 1.0, 11)[1:-1], conf, side="left"))
         bins[idx]["n"] += 1
-        bins[idx]["conf_sum"] += conf
+        bins[idx]["confidences"].append(conf)
         bins[idx]["acc_sum"] += 1 if r["correct"] else 0
     out = []
     for b in bins:
@@ -1117,7 +1119,7 @@ def reliability_bins(rows: list[dict]) -> list[dict]:
             {
                 "lo": b["lo"],
                 "n": n,
-                "conf": b["conf_sum"] / n if n else None,
+                "conf": math.fsum(b["confidences"]) / n if n else None,
                 "acc": b["acc_sum"] / n if n else 0.0,
             }
         )
@@ -2087,7 +2089,7 @@ def build_report_model(
     latency_scope = "mixed" if len(latency_scopes) > 1 else next(iter(latency_scopes), "request")
 
     known_subtotals = [c.cost_usd for c in cells.values() if c.cost_usd is not None]
-    selected_spend = sum(known_subtotals) if known_subtotals else None
+    selected_spend = math.fsum(known_subtotals) if known_subtotals else None
     return ReportModel(
         runs=runs,
         cells=cells,
