@@ -829,7 +829,7 @@ def run_cell(
             record.input_tokens,
             record.output_tokens,
             usage_details=record.usage_details,
-            block_incomplete=record.usage_complete,
+            block_incomplete=(record.outcome == "ok" or record.usage_complete),
         )
         tracker.check_stop(controller)
         if record.outcome == "auth":
@@ -1038,6 +1038,7 @@ def run_grid(spec: RunSpec, repo_root: Path | None = None) -> tuple[Path, dict]:
             "request_timeout_s": REQUEST_TIMEOUT_S,
             "hard_cap_usd": spec.hard_cap_usd,
             "soft_cap_usd": spec.soft_cap_usd,
+            "soft_cap_policy": "advisory target recorded for review; does not stop scheduling",
             "item_limit": spec.item_limit,
             "latency_scope": "decision",
             "prompt_sha256": prompt_fingerprint(),
@@ -1205,7 +1206,10 @@ def run_grid(spec: RunSpec, repo_root: Path | None = None) -> tuple[Path, dict]:
                 output_tokens,
                 negotiation=True,
                 usage_details=record.get("usage_details"),
-                block_incomplete=(input_tokens is not None and output_tokens is not None),
+                block_incomplete=(
+                    record.get("ok", True)
+                    or (input_tokens is not None and output_tokens is not None)
+                ),
             )
             tracker.check_stop(controller)
             if record.get("category") == "auth":

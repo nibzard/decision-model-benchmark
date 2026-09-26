@@ -920,3 +920,67 @@ def test_lane_exception_stops_peer_before_main_wait_finishes(tmp_path, monkeypat
     cell = next(cell for cell in manifest["cells"] if cell["contender"] == broken.name)
     assert cell["status"] == "failed"
     assert cell["expected_rows"] == 20
+
+
+@pytest.mark.parametrize("input_tokens,output_tokens", [(None, None), (10, None), (None, 1)])
+def test_successful_paid_missing_usage_stops_next_decision(tmp_path, input_tokens, output_tokens):
+    contender = MockContender(
+        name="openai:gpt-5.4-nano",
+        replies=[
+            Decision(
+                choice_index=0,
+                confidence=0.8,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            )
+        ],
+    )
+    contender.provider = "openai"
+    spec = _spec(tmp_path, contender, concurrency=1)
+    run_dir, manifest = run_grid(spec, tmp_path)
+    assert len(contender.calls) == 1
+    assert manifest["status"] == "stopped_accounting"
+    assert manifest["cost_complete"] is False
+    assert manifest["unknown_usage_attempts"][contender.name] == 1
+    row = json.loads((run_dir / "results.jsonl").read_text())
+    assert row["ok"] is True
+    assert row["input_tokens"] == input_tokens
+    assert row["output_tokens"] == output_tokens
+    assert any(stop["scope"] == "accounting" for stop in manifest["stops"])
+
+
+@pytest.mark.parametrize("input_tokens,output_tokens", [(None, None), (10, None), (None, 1)])
+def test_successful_paid_missing_probe_usage_stops_setup(tmp_path, input_tokens, output_tokens):
+    record = {
+        "ok": True,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "usage_details": {},
+    }
+    contender = ProbeContender([record, record])
+    spec = _spec(tmp_path, contender, negotiate=True)
+    run_dir, manifest = run_grid(spec, tmp_path)
+    assert contender.probes == 1
+    assert contender.calls == []
+    assert manifest["status"] == "stopped_accounting"
+    assert manifest["cost_complete"] is False
+    assert manifest["unknown_usage_attempts"][contender.name] == 1
+    probe = json.loads((run_dir / "raw" / "negotiation.attempts.jsonl").read_text())
+    assert probe["ok"] is True
+    assert probe["usage_complete"] is False
+    assert probe["input_tokens"] == input_tokens
+    assert probe["output_tokens"] == output_tokens
+
+
+def test_usage_less_paid_rejection_remains_a_measured_outcome(tmp_path):
+    from dmb.contenders.base import ProviderRejected
+
+    contender = MockContender(name="typesafe:jev", replies=[ProviderRejected("choice-count cap")])
+    contender.provider = "typesafe"
+    spec = _spec(tmp_path, contender, concurrency=1)
+    _run_dir, manifest = run_grid(spec, tmp_path)
+    assert len(contender.calls) == 20
+    assert manifest["status"] == "complete"
+    assert manifest["cost_complete"] is False
+    assert manifest["unknown_usage_attempts"][contender.name] == 20
+    assert not manifest["stops"]
