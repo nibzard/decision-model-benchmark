@@ -27,6 +27,7 @@ key is absent instead of constructing the contender (SPEC.md T2.5).
 from __future__ import annotations
 
 import os
+from threading import local
 
 import httpx
 
@@ -72,6 +73,7 @@ class JevContender(Contender):
                 "content-type": "application/json",
             },
         )
+        self._response_context = local()
         self.notes: list[str] = []
 
     def negotiate(self, before_attempt=None, on_attempt=None) -> dict:
@@ -135,25 +137,26 @@ class JevContender(Contender):
         try:
             return self._post_response(body)
         except ContenderError as exc:
-            response = getattr(self, "_last_http_response", None)
+            response = getattr(self._response_context, "response", None)
             if response is not None:
                 try:
                     payload = response.json()
                 except ValueError:
                     payload = None
+                    exc.response = response.text
                 if payload is not None:
                     exc.attach(*jev_usage(payload), payload, usage_details(payload, "jev"))
             raise
 
     def _post_response(self, body: dict) -> dict:
-        self._last_http_response = None
+        self._response_context.response = None
         try:
             response = self._client.post(API_URL, json=body)
         except httpx.TimeoutException as exc:
             raise TransportError(f"timeout: {exc}") from exc
         except httpx.HTTPError as exc:
             raise TransportError(f"connection error: {exc}") from exc
-        self._last_http_response = response
+        self._response_context.response = response
         if response.status_code == 429:
             raise RateLimited(f"429 (retry-after: {response.headers.get('retry-after', '?')})")
         if response.status_code in (401, 403):
