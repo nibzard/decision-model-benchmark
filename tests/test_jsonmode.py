@@ -101,7 +101,12 @@ class TestNegotiationAndBilling:
             "choices": [{"message": {"content": '{"choice_index": 1, "confidence": 1.0}'}}],
             "usage": {"prompt_tokens": 42, "completion_tokens": 7},
         }
-        assert contender.negotiate() == {"input_tokens": 42, "output_tokens": 7}
+        result = contender.negotiate()
+        assert result["input_tokens"] == 42
+        assert result["output_tokens"] == 7
+        assert len(result["attempts"]) == 1
+        assert result["attempts"][0]["ok"]
+        assert result["configuration_fingerprint"] == contender.configuration_fingerprint
 
     def test_negotiate_without_usage_reports_none(self):
         contender = self._contender()
@@ -109,7 +114,9 @@ class TestNegotiationAndBilling:
             "choices": [{"message": {"content": '{"choice_index": 0, "confidence": 1.0}'}}],
             "usage": {},
         }
-        assert contender.negotiate() is None
+        result = contender.negotiate()
+        assert result["input_tokens"] is None
+        assert len(result["attempts"]) == 1
 
     def test_negotiate_failure_returns_none_with_note(self):
         contender = self._contender()
@@ -118,7 +125,9 @@ class TestNegotiationAndBilling:
             raise TransportError("connection refused")
 
         contender._post = down
-        assert contender.negotiate() is None
+        result = contender.negotiate()
+        assert result["input_tokens"] is None
+        assert len(result["attempts"]) == 1
         assert any("negotiation probe failed" in note for note in contender.notes)
 
     def test_malformed_reply_attaches_usage_and_response(self):
@@ -151,8 +160,11 @@ class TestAnthropicTextFallback:
         response = {
             "content": [
                 {"type": "text", "text": "thinking out loud"},
-                {"type": "tool_use", "name": "record_decision",
-                 "input": {"choice_index": 1, "confidence": 0.5}},
+                {
+                    "type": "tool_use",
+                    "name": "record_decision",
+                    "input": {"choice_index": 1, "confidence": 0.5},
+                },
             ]
         }
         payload, source = contender._extract_tool_input(response)
@@ -185,3 +197,174 @@ class TestAnthropicTextFallback:
         contender._post = lambda body: {"stop_reason": "max_tokens"}
         with pytest.raises(MalformedReply):
             contender._decide("state text", ["a", "b"])
+
+
+class TestSetupFreezeAndRobustness:
+    def _contender(self):
+        return JSONModeContender(
+            "probe:test", "test", "http://invalid", {}, response_format={"type": "json_object"}
+        )
+
+    def test_malformed_probe_is_billed_and_preserves_cache(self):
+        contender = self._contender()
+        contender._post = lambda body: {
+            "choices": [{"message": {"content": "broken"}}],
+            "usage": {
+                "prompt_tokens": 42,
+                "completion_tokens": 2,
+                "prompt_tokens_details": {"cached_tokens": 32},
+            },
+        }
+        records = []
+        result = contender.negotiate(on_attempt=records.append)
+        assert result["attempts"] == records
+        assert result["input_tokens"] == 42
+        assert records[0]["category"] == "schema"
+        assert records[0]["usage_details"]["cache_read_input_tokens"] == 32
+
+    def test_setup_adapts_then_scoring_never_mutates(self):
+        import httpx
+
+        contender = self._contender()
+        bodies = []
+
+        def server(request):
+            import json
+
+            body = json.loads(request.content)
+            bodies.append(body)
+            if "response_format" in body:
+                return httpx.Response(400, json={"error": "response_format unsupported"})
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": '{"choice_index": 0, "confidence": 1}'}}],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 2},
+                },
+            )
+
+        contender._client = httpx.Client(transport=httpx.MockTransport(server))
+        setup = contender.negotiate()
+        assert len(setup["attempts"]) == 2
+        assert "response_format" in bodies[0]
+        assert "response_format" not in bodies[1]
+        frozen = contender.configuration_fingerprint
+        contender._client = httpx.Client(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(400, json={"error": "temperature unsupported"})
+            )
+        )
+        with pytest.raises(TransportError):
+            contender.decide("state", ["a", "b"])
+        assert contender.configuration_fingerprint == frozen
+        with pytest.raises(ValueError, match="already frozen"):
+            contender.negotiate()
+
+    def test_before_callback_prevents_next_setup_call(self):
+        contender = self._contender()
+        contender._post = lambda body: pytest.fail("must not call provider")
+        result = contender.negotiate(before_attempt=lambda: False)
+        assert result["attempts"] == []
+
+    @pytest.mark.parametrize(
+        "response", [[], None, {"choices": [None]}, {"choices": [{"message": []}]}]
+    )
+    def test_malformed_shapes_are_classified(self, response):
+        contender = self._contender()
+        contender._post = lambda body: response
+        with pytest.raises(MalformedReply):
+            contender.decide("state", ["a", "b"])
+
+    @pytest.mark.parametrize(
+        "usage", [None, [], "text", {"prompt_tokens": True}, {"prompt_tokens": -1}]
+    )
+    def test_invalid_usage_never_becomes_token_count(self, usage):
+        assert openai_style_usage({"usage": usage}) == (None, None)
+
+    def test_anthropic_cache_semantics(self):
+        from dmb.contenders.jsonmode import usage_details
+
+        details = usage_details(
+            {
+                "usage": {
+                    "input_tokens": 4,
+                    "output_tokens": 2,
+                    "cache_read_input_tokens": 10,
+                    "cache_creation_input_tokens": 20,
+                }
+            },
+            "anthropic",
+        )
+        assert details["input_tokens_include_cache"] is False
+        assert details["cache_write_input_tokens"] == 20
+
+    def test_failed_http_probe_preserves_reported_usage(self):
+        import httpx
+
+        contender = self._contender()
+        contender._client = httpx.Client(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    500, json={"usage": {"prompt_tokens": 8, "completion_tokens": 1}}
+                )
+            )
+        )
+        result = contender.negotiate()
+        assert len(result["attempts"]) == 1
+        assert result["input_tokens"] == 8
+        assert result["attempts"][0]["category"] == "transport"
+
+
+@pytest.mark.parametrize("adapter", ["jsonmode", "anthropic", "jev"])
+def test_concurrent_http_errors_keep_their_own_usage(adapter, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    import httpx
+
+    if adapter == "anthropic":
+        from dmb.contenders.llm_anthropic import AnthropicContender
+
+        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "test")
+        contender = AnthropicContender("test")
+    elif adapter == "jev":
+        from dmb.contenders.jev import JevContender
+
+        monkeypatch.setenv("TYPESAFE_API_KEY", "test")
+        contender = JevContender()
+    else:
+        contender = JSONModeContender("probe:test", "model", "http://invalid", {})
+    barrier = Barrier(2)
+
+    def server(request):
+        import json
+
+        body = json.loads(request.content)
+        tokens = 10 if "first" in json.dumps(body) else 20
+        barrier.wait(timeout=3)
+        return httpx.Response(
+            500,
+            json={
+                "usage": {
+                    "prompt_tokens": tokens,
+                    "completion_tokens": 1,
+                    "input_tokens": tokens,
+                    "output_tokens": 1,
+                }
+            },
+        )
+
+    contender._client = httpx.Client(
+        transport=httpx.MockTransport(server), base_url="https://invalid"
+    )
+
+    def call(state):
+        with pytest.raises(TransportError) as exc:
+            contender.decide(state, ["a", "b"])
+        return exc.value.input_tokens
+
+    with ThreadPoolExecutor(2) as pool:
+        first = pool.submit(call, "first")
+        second = pool.submit(call, "second")
+        assert first.result() == 10
+        assert second.result() == 20
