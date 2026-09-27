@@ -916,7 +916,10 @@ def cardinality_svg(
     """
     ns = sorted({n for points in series.values() for n in points})
     if not ns:
-        return "<svg xmlns='http://www.w3.org/2000/svg' width='720' height='60'></svg>"
+        return (
+            "<svg xmlns='http://www.w3.org/2000/svg' width='720' height='60'>"
+            "<rect width='100%' height='100%' fill='#fff'/></svg>"
+        )
 
     def x_of(n: int, left: float, width: float) -> float:
         frac = math.log2(n) / math.log2(ns[-1])
@@ -965,6 +968,7 @@ def cardinality_svg(
     out = [
         f"<svg xmlns='http://www.w3.org/2000/svg' width='{w:.0f}' height='{h:.0f}' "
         f"viewBox='0 0 {w:.0f} {h:.0f}' font-family='monospace' font-size='11'>",
+        "<rect width='100%' height='100%' fill='#fff'/>",
         f"<text x='{pad}' y='20'>{html.escape(title)}</text>",
     ]
     for panel, (key, label, y_fmt) in enumerate(
@@ -1059,6 +1063,7 @@ def reliability_svg(name: str, bins: list[dict]) -> str:
     out = [
         f"<svg xmlns='http://www.w3.org/2000/svg' width='{w:.0f}' height='{h:.0f}' "
         f"viewBox='0 0 {w:.0f} {h:.0f}' font-family='monospace' font-size='11'>",
+        "<rect width='100%' height='100%' fill='#fff'/>",
         f"<text x='{pad}' y='20'>{html.escape(name)}: scores / outcomes</text>",
         f"<rect x='{pad}' y='{top}' width='{w - 2 * pad}' height='{height}' "
         f"fill='#f8f8f8' stroke='#ccc'/>",
@@ -1248,6 +1253,7 @@ def _public_configuration(value: object) -> dict | None:
         "default",
         "record_decision",
         "provider-defined confidence",
+        "jev-1.13.0",
         *(p.model for p in PRICES),
         *(p.contender for p in PRICES),
         *(p.contender.split(":", 1)[0] for p in PRICES),

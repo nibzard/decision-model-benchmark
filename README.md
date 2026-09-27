@@ -5,21 +5,27 @@ score. It measures accuracy, latency, cost, failures, and how confidence relates
 to correctness. The contenders include TypeSafe AI's jev, LLMs with structured
 output, and deterministic baselines.
 
-In the recent pilot, GPT-6 Luna cost least and Gemini 3.8 Flash scored 88.3% on
-banking and 100% on spam. Historical runs put jev and Cerebras close on latency.
+In the recent pilot, jev scored 80.5% on banking and 98% on spam, with median
+latency around 0.27 seconds. GPT-6 Luna was the cheapest LLM, and Gemini 3.8 Flash
+scored 88.3% on banking and 100% on spam. Historical runs put jev and Cerebras
+close on latency.
 These findings apply to the tested endpoints, settings, and datasets. Small
 samples and differences between studies limit broader comparisons.
 
 ## Recent findings
 
 The September 26, 2026 pilot planned 256 decisions per model across five suites,
-with one repeat and a shared $10 cap. Astra was excluded. Five models finished
-without failed decisions; Gemini Pro reached account quotas before completing
-its rerun. Total known list-price cost was **$1.85**, including probes, retries,
-and both Pro runs. Provider invoices were not reconciled.
+with one repeat and a shared $10 cap. It initially tested six LLMs, then added
+jev on the exact same frozen items and current protocol. Astra was excluded.
+Five LLMs returned valid decisions on all items. jev returned 244 valid decisions
+and rejected 12 requests above its option limit; Gemini Pro reached account
+quotas before completing its rerun. Total known list-price cost was **$1.86**,
+including probes, retries, both Pro runs, and jev. Provider invoices were not
+reconciled.
 
-| Model | Banking accuracy (77 items) | Spam accuracy (50 items) | Cost for 256 decisions | Coverage |
+| Model | Banking accuracy (77 items) | Spam accuracy (50 items) | Known decision cost | Coverage |
 |---|---:|---:|---:|---|
+| jev 1.13 | 80.5% | 98% | $0.014* | 244/256 valid; 12 option-limit rejections |
 | GPT-6 Luna | 80.5% | 90% | $0.021 | Complete |
 | GPT-6 Sol | 85.7% | 94% | $0.426 | Complete |
 | GPT-5.6 Terra | 88.3% | 76% | $0.437 | Complete |
@@ -27,21 +33,35 @@ and both Pro runs. Provider invoices were not reconciled.
 | Gemini 3.5 Flash-Lite | 77.9% | 66% | $0.073 | Complete |
 | Gemini 3.1 Pro Preview | 88.3% | 100% of 37 valid items | Not comparable | Partial |
 
-Per-model costs above cover recorded decision attempts and exclude setup probes.
+Per-model costs above cover the 256-item sample's recorded decision attempts and
+exclude setup probes. *jev's figure is incomplete: rejected requests did not
+report token usage. Its price uses the [provider's published rate](https://docs.typesafe.ai/models),
+not a reconciled invoice.
 Pro's spam score uses only its 37 valid rerun responses; it is not a result on
 all 50 items. The total includes costs from the original Pro run even where the
 rerun replaced its observations in the merged report.
 
-- Luna cost about two cents for all 256 decisions, with 90% spam accuracy.
+- jev matched Luna's banking accuracy and scored 98% on spam, versus Luna's 90%.
+  Its median latency was 0.26 to 0.28 seconds across suites, faster than every
+  tested LLM in this pilot. Its known decision cost was lower, with the rejected
+  request accounting gap noted above.
+- Luna was the cheapest LLM at about two cents for all 256 decisions, with 90%
+  spam accuracy.
 - Flash matched Terra's banking score and answered all 50 spam items correctly
   at roughly half Terra's decision cost.
-- Flash-Lite was fastest, with median latency around 0.75 seconds per decision
+- Flash-Lite was the fastest LLM, with median latency around 0.75 seconds per
+  decision
   across suites, but scored only 66% on spam.
-- All five complete models scored 100% on the planted code-word task, including
+- All five complete LLMs scored 100% on the planted code-word task, including
   lists of up to 512 options. This sample did not distinguish them on that task.
+  jev answered all 32 accepted items correctly through 255 options and rejected
+  all 12 items at 256, 384, and 512 options.
 - When every option was wrong, average confidence ranged from 5.8% for Terra to
   22% for Flash. Those scores describe responses to the uncertainty prompt;
   they do not establish general calibration.
+  jev's mean native score on the same no-good-option items was 53.7%. Its
+  provider-defined score has not been established as a probability of correctness,
+  so the confidence values need different interpretations.
 
 One repeat cannot establish repeat stability. The banking sample has only one
 item per intent, and the order suite has 15 base items. Use these scores to
@@ -82,9 +102,16 @@ to the other models' latency.
 
 The merged report replaces each Pro cell with the rerun's whole cell, including
 interrupted or unstarted cells. It does not select individual favorable answers.
-Both runs remain in the sanitized archive. Rate-limit responses without usage
-leave an accounting gap. The $1.85 subtotal covers known usage; the provider bill
-has not been verified.
+Both Pro runs and the added jev run remain in the sanitized archive. Rate-limit
+and jev option-limit responses without usage leave accounting gaps. The $1.86
+subtotal covers known usage; the provider bill has not been verified.
+
+jev uses pinned `jev-1.13.0`, one repeat, the same frozen item hashes, and the
+shared semantic uncertainty instructions. Its native request format differs
+from the LLM JSON format. Its confidence remains labeled provider-defined.
+The run cost $0.01354 in known usage including probes, at the provider's
+published input rate of $0.042/MTok with free output. All 12 rejected requests
+are retained as failures in coverage, rather than counted as successful answers.
 
 </details>
 
@@ -197,6 +224,18 @@ Add `--prepare-only` to create the sample without provider calls.
 Local items and full logs go to ignored `.benchmark-studies/<study-id>`;
 reports, sample provenance, and sanitized archives go to `results/<study-id>`.
 Existing study IDs are refused.
+
+To add jev to an existing terminal pilot, set `TYPESAFE_API_KEY` and run:
+
+```bash
+uv run python scripts/run_recent_sample.py --study-id my-recent-pilot \
+  --add-jev --hard-cap 10
+```
+
+This uses the existing frozen items, pins Jev 1.13, and deducts all prior runs'
+known spend from the original cap. It adds jev to the report and sanitized
+archive without rerunning the LLMs. The full 256-item sample includes option
+counts above jev's supported limit so those rejections remain visible.
 
 <details>
 <summary>Recover a Pro run after a minute quota</summary>

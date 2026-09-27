@@ -103,8 +103,9 @@ def test_pro_pacing_spaces_requests_including_retries(monkeypatch):
 @pytest.mark.parametrize(
     "status,spent,cap", [("running", 1, 10), ("complete", 10, 10), ("complete", 1, 11)]
 )
+@pytest.mark.parametrize("extension", ["repair_pro", "add_jev"])
 def test_repair_rejects_running_exhausted_or_raised_budget(
-    tmp_path, monkeypatch, status, spent, cap
+    tmp_path, monkeypatch, status, spent, cap, extension
 ):
     monkeypatch.setattr(pilot, "ROOT", tmp_path)
     run = tmp_path / ".benchmark-studies" / "pilot" / "runs" / "pilot"
@@ -113,4 +114,4 @@ def test_repair_rejects_running_exhausted_or_raised_budget(
         json.dumps({"status": status, "spend_usd": spent, "protocol": {"hard_cap_usd": 10}})
     )
     with pytest.raises(ValueError):
-        pilot.repair_pro("pilot", cap)
+        getattr(pilot, extension)("pilot", cap)

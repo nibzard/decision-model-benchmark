@@ -1,7 +1,7 @@
 # Decision-model benchmark: results
 
-Runs: recent-pilot-2026-09-26, recent-pilot-2026-09-26-pro-paced.
-Source manifests record $1.85 in total (historical totals may use nominal rates or incomplete usage). Recomputed known subtotal for selected cells: $1.48. This is not a complete bill where accounting is marked incomplete.
+Runs: recent-pilot-2026-09-26, recent-pilot-2026-09-26-pro-paced, recent-pilot-2026-09-26-jev.
+Source manifests record $1.86 in total (historical totals may use nominal rates or incomplete usage). Recomputed known subtotal for selected cells: $1.49. This is not a complete bill where accounting is marked incomplete.
 
 Every number in this file recomputes from `results.jsonl` and the
 manifests in the raw archive. Later runs replace earlier cells
@@ -34,6 +34,10 @@ Gemini Pro originally exceeded this account's 25 RPM quota. Its five cells are r
 
 The paced Pro rerun was interrupted after hitting a separate 250 requests/day quota (API retry delay about six hours). It yielded 114 valid decisions, including all 77 banking items and 37 SMS items. The other five models each completed all 256 decisions successfully. The first Pro run yielded 135 valid decisions across the five suites; those original observations remain available in the original-run report and archive. The merged report replaces whole Pro cells with the rerun, including interrupted or unstarted cells, rather than selecting favorable individual answers. No claim of a completed six-model comparison is made.
 
+Jev was added on the exact same frozen sample with one repeat and the shared uncertainty instructions, using pinned jev-1.13.0. Its native confidence is provider-defined, so probability calibration comparisons remain qualified. Input price $0.042/MTok, output free, reconfirmed at https://docs.typesafe.ai/models on 2026-09-26; invoices not reconciled. Jev known spend including probes: $0.01354181; all runs combined: $1.86132778.
+
+Jev returned 244/256 valid decisions: banking accuracy 80.5%, spam accuracy 98%, and median request latency 0.262 to 0.277 seconds across suites. The 12 cardinality failures were provider rejections at N=256, 384, and 512; accepted cardinalities through 255 were all correct. Rejected calls lacked usage, so Jev cost is a known subtotal. On 20 no-good-option items, mean native confidence was 0.5365; this score is provider-defined and is not assumed to be the same probability requested from LLMs.
+
 ## Protocol and data caveats
 
 - Cost caveats: some cells report incomplete usage. Unknown usage is not a measured zero; see the cost table markers and the coverage table.
@@ -47,6 +51,7 @@ The paced Pro rerun was interrupted after hitting a separate 250 requests/day qu
 
 - [recent-pilot-2026-09-26] Free-text provider/run diagnostics are omitted by S2 publication policy; structured protocol and configuration metadata remain.
 - [recent-pilot-2026-09-26-pro-paced] Free-text provider/run diagnostics are omitted by S2 publication policy; structured protocol and configuration metadata remain.
+- [recent-pilot-2026-09-26-jev] Free-text provider/run diagnostics are omitted by S2 publication policy; structured protocol and configuration metadata remain.
 
 ## Coverage (expected versus completed decisions)
 
@@ -82,6 +87,11 @@ The paced Pro rerun was interrupted after hitting a separate 250 requests/day qu
 | openai:gpt-6-sol | S3 cardinality sweep | ok | 44 | 44 | 44 | 0 | 0 | 100.0 | 100.0 |  | recent-pilot-2026-09-26 |
 | openai:gpt-6-sol | S4 order stability | ok | 45 | 45 | 45 | 0 | 0 | 100.0 | 100.0 |  | recent-pilot-2026-09-26 |
 | openai:gpt-6-sol | S5 forced uncertainty (score diagnostics) | ok | 40 | 40 | 40 | 0 | 0 | 100.0 | 100.0 |  | recent-pilot-2026-09-26 |
+| typesafe:jev | S1 intent77 (77-way banking) | ok | 77 | 77 | 77 | 0 | 0 | 100.0 | 100.0 |  | recent-pilot-2026-09-26-jev |
+| typesafe:jev | S2 SMS spam (2-way) | ok | 50 | 50 | 50 | 0 | 0 | 100.0 | 100.0 |  | recent-pilot-2026-09-26-jev |
+| typesafe:jev | S3 cardinality sweep | ok | 44 | 44 | 32 | 0 | 12 | 100.0 | 72.7 |  | recent-pilot-2026-09-26-jev |
+| typesafe:jev | S4 order stability | ok | 45 | 45 | 45 | 0 | 0 | 100.0 | 100.0 |  | recent-pilot-2026-09-26-jev |
+| typesafe:jev | S5 forced uncertainty (score diagnostics) | ok | 40 | 40 | 40 | 0 | 0 | 100.0 | 100.0 |  | recent-pilot-2026-09-26-jev |
 
 A cell is partial when it stopped early or returned malformed or
 failed decisions. Empty, failed, and skipped cells stay listed
@@ -97,6 +107,7 @@ with their reasons.
 | openai:gpt-5.6-terra | 88.3 | 76.0 | 100.0 | 86.7 | 15.0 |
 | openai:gpt-6-luna | 80.5 | 90.0 | 100.0 | 88.9 | 15.0 |
 | openai:gpt-6-sol | 85.7 | 94.0 | 100.0 | 93.3 | 10.0 |
+| typesafe:jev | 80.5 | 98.0 | 100.0* | 86.7 | 5.0 |
 
 ## Macro-F1 (stable option labels; absent classes count as 0) (*: partial coverage; see the coverage table). Not applicable on S3 and S5: their option texts vary between items, so positions are not classes
 
@@ -108,6 +119,7 @@ with their reasons.
 | openai:gpt-5.6-terra | 0.851 | 0.650 | n/a | 0.165 | n/a |
 | openai:gpt-6-luna | 0.764 | 0.823 | n/a | 0.172 | n/a |
 | openai:gpt-6-sol | 0.827 | 0.882 | n/a | 0.182 | n/a |
+| typesafe:jev | 0.753 | 0.956 | n/a | 0.165 | n/a |
 
 ## ECE diagnostic (gold-labelled only; S5 underdetermined only)
 
@@ -119,6 +131,7 @@ with their reasons.
 | openai:gpt-5.6-terra | 0.049 | 0.187 | 0.000 | 0.131 | 0.094 |
 | openai:gpt-6-luna | 0.126 | 0.183 | 0.000 | 0.050 | 0.025 |
 | openai:gpt-6-sol | 0.083 | 0.055 | 0.000 | 0.052 | 0.063 |
+| typesafe:jev | 0.062 | 0.165 | 0.022 | 0.083 | 0.352 |
 
 ## Brier diagnostic (gold-labelled only; S5 underdetermined only)
 
@@ -130,6 +143,7 @@ with their reasons.
 | openai:gpt-5.6-terra | 0.080 | 0.193 | 0.000 | 0.095 | 0.136 |
 | openai:gpt-6-luna | 0.134 | 0.141 | 0.000 | 0.082 | 0.122 |
 | openai:gpt-6-sol | 0.092 | 0.040 | 0.000 | 0.041 | 0.091 |
+| typesafe:jev | 0.128 | 0.085 | 0.003 | 0.121 | 0.193 |
 
 ## Malformed rate (percent of completed decisions)
 
@@ -141,6 +155,7 @@ with their reasons.
 | openai:gpt-5.6-terra | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
 | openai:gpt-6-luna | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
 | openai:gpt-6-sol | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
+| typesafe:jev | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
 
 ## Failed attempts (rate, percent of completed decisions)
 
@@ -152,6 +167,7 @@ with their reasons.
 | openai:gpt-5.6-terra | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
 | openai:gpt-6-luna | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
 | openai:gpt-6-sol | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
+| typesafe:jev | 0.0 | 0.0 | 27.3 | 0.0 | 0.0 |
 
 ## Latency p50 (ms)
 
@@ -163,6 +179,7 @@ with their reasons.
 | openai:gpt-5.6-terra | 1,011 | 940 | 880 | 953 | 967 |
 | openai:gpt-6-luna | 956 | 854 | 985 | 952 | 879 |
 | openai:gpt-6-sol | 1,333 | 1,116 | 1,255 | 1,271 | 1,245 |
+| typesafe:jev | 277 | 262 | 273 | 263 | 272 |
 
 ## Latency p95 (ms)
 
@@ -174,6 +191,7 @@ with their reasons.
 | openai:gpt-5.6-terra | 1,209 | 1,189 | 983 | 1,201 | 1,166 |
 | openai:gpt-6-luna | 1,358 | 1,206 | 1,249 | 1,299 | 1,127 |
 | openai:gpt-6-sol | 2,113 | 1,374 | 1,589 | 2,074 | 1,539 |
+| typesafe:jev | 347 | 310 | 319 | 294 | 300 |
 
 ## Latency p99 (ms)
 
@@ -185,6 +203,7 @@ with their reasons.
 | openai:gpt-5.6-terra | 1,364 | 1,229 | 1,283 | 1,805 | 1,226 |
 | openai:gpt-6-luna | 2,058 | 1,314 | 1,503 | 1,538 | 1,228 |
 | openai:gpt-6-sol | 2,791 | 1,533 | 1,899 | 2,183 | 1,867 |
+| typesafe:jev | 537 | 332 | 343 | 300 | 304 |
 
 ## Known cost per 1,000 completed decisions (USD) (†: incomplete usage; see the coverage table)
 
@@ -196,6 +215,7 @@ with their reasons.
 | openai:gpt-5.6-terra | $1.85 | $0.65 | $3.46 | $1.84 | $0.69 |
 | openai:gpt-6-luna | $0.09 | $0.03 | $0.17 | $0.09 | $0.03 |
 | openai:gpt-6-sol | $1.80 | $0.60 | $3.41 | $1.80 | $0.65 |
+| typesafe:jev | $0.08 | $0.02 | $0.06† | $0.08 | $0.02 |
 
 ## S4 overall flip rate (all repeats and orders; percent of observed bases)
 
@@ -207,6 +227,7 @@ with their reasons.
 | openai:gpt-5.6-terra | 0.0 |
 | openai:gpt-6-luna | 13.3 |
 | openai:gpt-6-sol | 13.3 |
+| typesafe:jev | 0.0 |
 
 ## S4 mean confidence range across all repeats and orders
 
@@ -218,6 +239,7 @@ with their reasons.
 | openai:gpt-5.6-terra | 0.055 |
 | openai:gpt-6-luna | 0.056 |
 | openai:gpt-6-sol | 0.052 |
+| typesafe:jev | 0.067 |
 
 ## S5 score <= 0.5 on no-good items (percent; score semantics differ)
 
@@ -229,6 +251,7 @@ with their reasons.
 | openai:gpt-5.6-terra | 100.0 |
 | openai:gpt-6-luna | 95.0 |
 | openai:gpt-6-sol | 100.0 |
+| typesafe:jev | 55.0 |
 
 ## S5 mean confidence on no-good items
 
@@ -240,6 +263,7 @@ with their reasons.
 | openai:gpt-5.6-terra | 0.058 |
 | openai:gpt-6-luna | 0.082 |
 | openai:gpt-6-sol | 0.150 |
+| typesafe:jev | 0.536 |
 
 ## S4 within-order repeat disagreement (complete matched blocks, percent)
 
@@ -251,6 +275,7 @@ with their reasons.
 | openai:gpt-5.6-terra | - |
 | openai:gpt-6-luna | - |
 | openai:gpt-6-sol | - |
+| typesafe:jev | - |
 
 ## S4 across-order disagreement (complete matched-repeat blocks, percent)
 
@@ -262,6 +287,7 @@ with their reasons.
 | openai:gpt-5.6-terra | - |
 | openai:gpt-6-luna | - |
 | openai:gpt-6-sol | - |
+| typesafe:jev | - |
 
 ## S5 no-good ECE diagnostic (every valid choice is wrong)
 
@@ -273,6 +299,7 @@ with their reasons.
 | openai:gpt-5.6-terra | 0.058 |
 | openai:gpt-6-luna | 0.083 |
 | openai:gpt-6-sol | 0.150 |
+| typesafe:jev | 0.536 |
 
 ## S5 no-good Brier diagnostic (every valid choice is wrong)
 
@@ -284,6 +311,7 @@ with their reasons.
 | openai:gpt-5.6-terra | 0.004 |
 | openai:gpt-6-luna | 0.054 |
 | openai:gpt-6-sol | 0.032 |
+| typesafe:jev | 0.372 |
 
 ## Cost accounting completeness
 
@@ -319,6 +347,11 @@ with their reasons.
 | openai:gpt-6-sol | s3_cardinality | yes | every recorded attempt of this cell |  |
 | openai:gpt-6-sol | s4_order | yes | every recorded attempt of this cell |  |
 | openai:gpt-6-sol | s5_confidence | yes | every recorded attempt of this cell |  |
+| typesafe:jev | s1_intent77 | yes | every recorded attempt of this cell |  |
+| typesafe:jev | s2_spam | yes | every recorded attempt of this cell |  |
+| typesafe:jev | s3_cardinality | no | every recorded attempt of this cell | missing or invalid token usage |
+| typesafe:jev | s4_order | yes | every recorded attempt of this cell |  |
+| typesafe:jev | s5_confidence | yes | every recorded attempt of this cell |  |
 
 ## Descriptive accuracy interval (equal item weights, 95% cluster bootstrap, percent)
 
@@ -351,6 +384,11 @@ with their reasons.
 | openai:gpt-6-sol | s3_cardinality | 44 | 100.0 | 100.0 | 100.0 |
 | openai:gpt-6-sol | s4_order | 15 | 93.3 | 82.2 | 100.0 |
 | openai:gpt-6-sol | s5_confidence | 20 | 10.0 | 0.0 | 25.0 |
+| typesafe:jev | s1_intent77 | 77 | 80.5 | 71.4 | 89.6 |
+| typesafe:jev | s2_spam | 50 | 98.0 | 94.0 | 100.0 |
+| typesafe:jev | s3_cardinality | 32 | 100.0 | 100.0 | 100.0 |
+| typesafe:jev | s4_order | 15 | 86.7 | 66.7 | 100.0 |
+| typesafe:jev | s5_confidence | 20 | 5.0 | 0.0 | 15.0 |
 
 ## S4 comparison coverage (missing blocks are excluded)
 
@@ -362,6 +400,7 @@ with their reasons.
 | openai:gpt-5.6-terra | 0 | 0 | 0 | 0 | 0 |
 | openai:gpt-6-luna | 0 | 0 | 0 | 0 | 0 |
 | openai:gpt-6-sol | 0 | 0 | 0 | 0 | 0 |
+| typesafe:jev | 0 | 0 | 0 | 0 | 0 |
 
 ## S5 diagnostic denominators (valid decisions only)
 
@@ -379,6 +418,8 @@ with their reasons.
 | openai:gpt-6-luna | underdetermined | 20 | 20 |
 | openai:gpt-6-sol | no_good_option | 20 | 20 |
 | openai:gpt-6-sol | underdetermined | 20 | 20 |
+| typesafe:jev | no_good_option | 20 | 20 |
+| typesafe:jev | underdetermined | 20 | 20 |
 
 ## Cardinality (S3)
 
@@ -409,6 +450,10 @@ with their reasons.
 ### openai:gpt-6-sol
 
 ![openai:gpt-6-sol](reliability-openai__gpt-6-sol.svg)
+
+### typesafe:jev
+
+![typesafe:jev](reliability-typesafe__jev.svg)
 
 ## Machine-readable cell metrics
 

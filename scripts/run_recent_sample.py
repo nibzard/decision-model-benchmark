@@ -15,6 +15,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from dmb.contenders import build_contenders
+from dmb.contenders.jev import JevContender
 from dmb.contenders.llm_gemini import GeminiContender
 from dmb.report import render_report
 from dmb.runner import RunSpec, exit_code_for, run_grid, validate_run_id
@@ -31,6 +32,67 @@ RECENT = [
     "gemini:gemini-3.1-pro-preview",
 ]
 CHEAP = ["openai:gpt-6-luna", "gemini:gemini-3.5-flash-lite"]
+
+
+def add_jev(study_id, total_cap):
+    """Add the decision-model control on the existing frozen pilot items."""
+    validate_run_id(study_id)
+    study = ROOT / ".benchmark-studies" / study_id
+    original = study / "runs" / study_id
+    prior = json.loads((original / "manifest.json").read_text())
+    if total_cap > prior["protocol"]["hard_cap_usd"]:
+        raise ValueError("extension cannot raise the original budget")
+    runs = [original] + sorted(p for p in (study / "runs").iterdir() if p != original)
+    manifests = [json.loads((p / "manifest.json").read_text()) for p in runs]
+    if any(m["status"] == "running" for m in manifests):
+        raise ValueError("all prior runs must be terminal before extension")
+    spent = sum(m["spend_usd"] for m in manifests)
+    remaining = total_cap - spent
+    if remaining <= 0:
+        raise ValueError("prior runs exhausted the shared budget")
+    c = JevContender(model="jev-1.13.0")
+    spec = RunSpec(
+        run_id=study_id + "-jev",
+        suites=list(SUITE_ORDER),
+        contenders=[c],
+        repeats=1,
+        hard_cap_usd=remaining,
+        soft_cap_usd=remaining,
+        negotiate=True,
+        notes=["same frozen pilot items; Jev 1.13 pinned; provider-defined confidence"],
+    )
+    try:
+        added, manifest = run_grid(spec, study)
+    finally:
+        c.close()
+    out = ROOT / "results" / study_id
+    note = out / "STUDY.md"
+    note.write_text(
+        note.read_text() + "\nJev was added on the exact same frozen sample with "
+        "one repeat and the shared uncertainty instructions, using pinned "
+        "jev-1.13.0. Its native confidence is provider-defined, so probability "
+        "calibration comparisons remain qualified. Input price $0.042/MTok, "
+        "output free, reconfirmed at https://docs.typesafe.ai/models on "
+        f"2026-09-26; invoices not reconciled. Jev known spend including probes: "
+        f"${manifest['spend_usd']:.8f}; all runs combined: "
+        f"${spent + manifest['spend_usd']:.8f}.\n"
+    )
+    render_report(
+        original, out, extra_run_dirs=runs[1:] + [added], name=study_id, correction_note_path=note
+    )
+    print(
+        json.dumps(
+            {
+                "status": manifest["status"],
+                "jev_known_spend_usd": manifest["spend_usd"],
+                "combined_known_spend_usd": spent + manifest["spend_usd"],
+                "report": str(out),
+            },
+            indent=2,
+        ),
+        flush=True,
+    )
+    return exit_code_for(manifest)
 
 
 class PacedPro(GeminiContender):
@@ -182,9 +244,14 @@ def main():
     parser.add_argument("--hard-cap", type=float, default=10.0)
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--repair-pro", action="store_true")
+    parser.add_argument("--add-jev", action="store_true")
     args = parser.parse_args()
     if not 0 < args.hard_cap <= 10 or args.hard_cap != args.hard_cap:
         parser.error("pilot cap must be positive and at most $10")
+    if args.add_jev:
+        if args.prepare_only or args.repair_pro:
+            parser.error("add-jev cannot be combined with prepare-only or repair-pro")
+        return add_jev(args.study_id, args.hard_cap)
     if args.repair_pro:
         if args.prepare_only:
             parser.error("repair-pro and prepare-only are mutually exclusive")

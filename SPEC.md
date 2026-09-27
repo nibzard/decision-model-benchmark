@@ -72,6 +72,13 @@ subsets. Frozen sample hashes differ from full-suite hashes: reports are separat
 and no repeat-stability conclusion follows. `scripts/run_recent_sample.py`
 records selection IDs and original/sample hashes and produces sanitized artifacts.
 
+The pilot was extended with pinned `jev-1.13.0` on those same 256 frozen items,
+one repeat, and the current shared semantic uncertainty instructions. The
+extension deducts prior runs' known spend from the shared $10 cap. Cardinalities
+above jev's supported limit remain in the sample and count as provider rejections.
+jev's confidence remains a provider-defined score, separately labeled from the
+LLMs' prompted probability of correctness.
+
 ### C. Deterministic baselines
 
 | Contender | Purpose |
