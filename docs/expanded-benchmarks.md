@@ -96,7 +96,7 @@ has its own $5 cap. A stopped validation run cannot fit a threshold.
    ```bash
    uv run dmb run --run-id expanded-validation \
      --suites s6_banking77_validation,s7_clinc150_validation,s8_nlupp_validation \
-     --contenders typesafe:jev --repeats 1 --hard-cap 5
+     --only-jev --repeats 1 --hard-cap 5
    ```
 
 2. Fit thresholds using validation results only:
@@ -112,7 +112,7 @@ has its own $5 cap. A stopped validation run cannot fit a threshold.
    ```bash
    uv run dmb run --run-id expanded-test \
      --suites s6_banking77_test,s7_clinc150_test,s8_nlupp_test \
-     --contenders typesafe:jev --repeats 1 --hard-cap 5
+     --only-jev --repeats 1 --hard-cap 5
    ```
 
 4. Apply the frozen thresholds to test results:

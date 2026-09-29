@@ -5,12 +5,72 @@ score. It measures accuracy, latency, cost, failures, and how confidence relates
 to correctness. The contenders include TypeSafe AI's jev, LLMs with structured
 output, and deterministic baselines.
 
-In the recent pilot, jev scored 80.5% on banking and 98% on spam, with median
+On September 29, 2026, `jev-latest` scored 79.2% on Banking77's full official
+test set and 88.6% on CLINC150 with out-of-scope queries. On NLU++, micro intent
+F1 was 48.3%, and only 4.3% of messages had every intent label correct.
+Median latency ranged from 267 to 316 ms per decision across these suites.
+
+In the September 26 pilot, jev scored 80.5% on banking and 98% on spam, with median
 latency around 0.27 seconds. GPT-6 Luna was the cheapest LLM, and Gemini 3.8 Flash
 scored 88.3% on banking and 100% on spam. Historical runs put jev and Cerebras
 close on latency.
 These findings apply to the tested endpoints, settings, and datasets. Small
 samples and differences between studies limit broader comparisons.
+
+> **Use these benchmarks as a guide.** They show part of the picture;
+> results in your production environment can differ substantially. Run your
+> own evaluations on representative data, with your prompts, traffic patterns,
+> and operating constraints. Choose models based on the accuracy, latency,
+> reliability, and cost your application needs.
+
+## Expanded results: September 29, 2026
+
+The expanded run tested only `jev-latest`, with one repeat on every validation
+and test item. All **40,226 decisions** returned valid responses, with no
+request failures. Total recorded cost was **$1.71**: $0.64 for validation and
+$1.07 for test, using recorded token usage and the repository's vendor-claimed
+rate. These costs are not invoice-verified.
+
+| Test suite | Test size | Main result | p50 latency | p95 latency |
+|---|---|---|---:|---:|
+| S6: Banking77 | 3,080 messages | 79.2% accuracy | 316 ms | 570 ms |
+| S7: CLINC150 | 5,500 queries, including 1,000 out-of-scope | 88.6% accuracy | 279 ms | 416 ms |
+| S8: NLU++ | 302 messages; 13,712 binary intent decisions | 48.3% micro intent F1; 4.3% complete-message accuracy | 267 ms | 333 ms |
+
+CLINC150 out-of-scope precision was **90.3%**, and recall was **81.2%**.
+Accuracy on supported intents was 90.3%.
+
+NLU++ macro intent F1 was **58.1%**, counting absent intents as zero.
+Its 91.4% binary accuracy includes many negative labels. Complete-message
+accuracy requires every intent label to be correct. Each intent uses a separate
+binary Choice request, so latency is per request, not per message. Native Noul
+and batched questions were not tested. The selected folds and binary task
+differ from published NLU++ evaluations.
+
+Validation and test ran concurrently, with four workers per run. Latencies
+reflect that load. The model alias, items, and settings differ from the pilot;
+these scores do not establish a change in model quality or a ranking against LLMs.
+
+### Thresholds fitted on validation data
+
+Threshold selection targeted at most 5% empirical validation error, with at
+least 100 accepted decisions or complete messages. Thresholds were frozen
+before evaluation on test data.
+
+| Suite | Confidence threshold | Test coverage | Test error among accepted |
+|---|---:|---:|---:|
+| Banking77 | 0.96 | 51.2% | 3.68% |
+| CLINC150 | 0.62 | 88.3% | 6.65% |
+| NLU++ | No qualifying threshold | 0% | Not applicable |
+
+CLINC150 exceeded the 5% error target on test data. NLU++ had no qualifying
+threshold for complete messages. A validation error target does not guarantee
+test error. Jev's native confidence remains a provider-defined score, not a
+calibrated probability of correctness.
+
+Read the [expanded results summary](results/expanded-jev-2026-09-29/README.md),
+[full test report](results/expanded-jev-2026-09-29/test/expanded-test-jev-20260929.md),
+or [threshold evaluation](results/expanded-jev-2026-09-29/threshold-evaluation.json).
 
 ## Recent findings
 
@@ -211,7 +271,8 @@ The [expanded benchmark guide](docs/expanded-benchmarks.md) gives suite names,
 sample counts, local smoke commands, and threshold evaluation steps. Reports
 include out-of-scope detection and complete-message accuracy. NLU++ uses one
 binary Choice request per intent; native Noul and batched requests are not
-measured. These suites have no published model results yet.
+measured. The [jev expanded results](results/expanded-jev-2026-09-29/README.md)
+include full test scores, latency, and validation-fitted thresholds.
 
 ## Get started without paid calls
 

@@ -1,0 +1,42 @@
+{
+  "cells": [
+    {
+      "accepted": 1576,
+      "contender": "typesafe:jev",
+      "correct_all_requested": 0.7922077922077922,
+      "coverage": 0.5116883116883116,
+      "error_rate": 0.03680203045685279,
+      "expected": 3080,
+      "item_sha256": "6211483a8954293b66bbde91de9c21454f197e62327d4f21afbeacdc992815ed",
+      "suite": "s6_banking77_test",
+      "threshold": 0.96,
+      "unit": "decision"
+    },
+    {
+      "accepted": 4854,
+      "contender": "typesafe:jev",
+      "correct_all_requested": 0.8863636363636364,
+      "coverage": 0.8825454545454545,
+      "error_rate": 0.0665430572723527,
+      "expected": 5500,
+      "item_sha256": "5b3708dba8e8f25ee831bcaeb0f742cf96be2f741462697f0734ac23006d8db9",
+      "suite": "s7_clinc150_test",
+      "threshold": 0.62,
+      "unit": "decision"
+    },
+    {
+      "accepted": 0,
+      "contender": "typesafe:jev",
+      "correct_all_requested": 0.04304635761589404,
+      "coverage": 0.0,
+      "error_rate": null,
+      "expected": 302,
+      "item_sha256": "f5996478f0abd740589a9c8fd4ac74c42764a87cf0cac8595cf336aa07565bd7",
+      "suite": "s8_nlupp_test",
+      "threshold": null,
+      "unit": "message"
+    }
+  ],
+  "test_run": "expanded-test-jev-20260929",
+  "validation_run": "expanded-validation-jev-20260929"
+}
