@@ -23,15 +23,20 @@ quotas before completing its rerun. Total known list-price cost was **$1.86**,
 including probes, retries, both Pro runs, and jev. Provider invoices were not
 reconciled.
 
-| Model | Banking accuracy (77 items) | Spam accuracy (50 items) | Known decision cost | Coverage |
-|---|---:|---:|---:|---|
-| jev 1.13 | 80.5% | 98% | $0.014* | 244/256 valid; 12 option-limit rejections |
-| GPT-6 Luna | 80.5% | 90% | $0.021 | Complete |
-| GPT-6 Sol | 85.7% | 94% | $0.426 | Complete |
-| GPT-5.6 Terra | 88.3% | 76% | $0.437 | Complete |
-| Gemini 3.8 Flash | 88.3% | 100% | $0.216 | Complete |
-| Gemini 3.5 Flash-Lite | 77.9% | 66% | $0.073 | Complete |
-| Gemini 3.1 Pro Preview | 88.3% | 100% of 37 valid items | Not comparable | Partial |
+| Model | Banking accuracy (77 items) | Spam accuracy (50 items) | p50 latency across suites | Known decision cost | Coverage |
+|---|---:|---:|---:|---:|---|
+| jev 1.13 | 80.5% | 98% | 0.26–0.28 s | $0.014* | 244/256 valid; 12 option-limit rejections |
+| GPT-6 Luna | 80.5% | 90% | 0.85–0.99 s | $0.021 | Complete |
+| GPT-6 Sol | 85.7% | 94% | 1.12–1.33 s | $0.426 | Complete |
+| GPT-5.6 Terra | 88.3% | 76% | 0.88–1.01 s | $0.437 | Complete |
+| Gemini 3.8 Flash | 88.3% | 100% | 1.33–1.98 s | $0.216 | Complete |
+| Gemini 3.5 Flash-Lite | 77.9% | 66% | 0.74–0.78 s | $0.073 | Complete |
+| Gemini 3.1 Pro Preview | 88.3% | 100% of 37 valid items | 3.07–3.12 s | Not comparable | Partial |
+
+Each range spans the per-suite medians, not all request times. Pilot latency
+covers each complete decision, including retries and backoff. Pro has latency
+data for two suites only; its rerun included pacing between requests. Its speed
+is not directly comparable to the other models.
 
 Per-model costs above cover the 256-item sample's recorded decision attempts and
 exclude setup probes. *jev's figure is incomplete: rejected requests did not
@@ -130,6 +135,23 @@ a separate comparison.
 | How many options work? | jev succeeded through 255 choices and rejected 256, 384, and 512. Every tested LLM endpoint returned valid decisions with 512 choices. | The task is planted code-word retrieval. |
 | Do answers change? | Pooled S4 instability was 13% for jev and 37% for mini. Identical-order repeats changed on 5% and 25% of base items, respectively. | Pooled instability combines repeat variation and option permutations. |
 | Can confidence and cost be compared directly? | Historical S5 prompts gave unequal uncertainty instructions; historical cost records omit some retry usage and cache rates. | Fresh common-prompt runs and complete usage are needed for those comparisons. |
+
+Historical p50 latency by model, shown as the range of per-suite medians:
+
+| Model | p50 latency across suites |
+|---|---:|
+| jev | 264–276 ms |
+| gpt-oss-120b (Cerebras) | 303–346 ms |
+| gpt-5.4-mini | 660–710 ms |
+| gpt-5.4-nano | 684–782 ms |
+| deepseek-chat | 731–776 ms |
+| claude-sonnet-4.6 | 1.8–2.6 s |
+| glm-5.3-flash | 2.0–3.5 s |
+| claude-haiku-4.5 | 2.4–4.4 s |
+| glm-5.3 | 2.4–5.6 s |
+
+Historical cells come from mixed protocol versions, so latency scope can differ.
+The [v3 latency table](results/v3/v3.md#latency-p50-ms) gives each suite value.
 
 ![Historical accuracy and latency versus option count](results/v3/cardinality.svg)
 

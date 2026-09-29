@@ -904,16 +904,7 @@ def cardinality_svg(
     series: dict[str, dict[int, dict[str, float]]],
     title: str = "S3 cardinality: accuracy and p50 latency versus N",
 ) -> str:
-    """Two-panel SVG: accuracy versus N and p50 latency versus N (log x).
-
-    A legend below the panels maps colors to contenders. A dashed rule in
-    the contender's color marks the first N where its line stops; the
-    legend names the last N it covers. An N whose entry holds only None
-    values (rows exist, no valid decision) does not count as covered -
-    the line ends at the last N with a value. Crowded tick labels (254,
-    255, 256 sit 0.2 px apart on the log axis) are thinned by priority:
-    endpoints and truncation boundaries win.
-    """
+    """Draw one labeled row per contender so overlapping curves stay distinct."""
     ns = sorted({n for points in series.values() for n in points})
     if not ns:
         return (
@@ -921,136 +912,151 @@ def cardinality_svg(
             "<rect width='100%' height='100%' fill='#fff'/></svg>"
         )
 
-    def x_of(n: int, left: float, width: float) -> float:
-        frac = math.log2(n) / math.log2(ns[-1])
-        return left + frac * width
-
     order = sorted(series.items())
-    colors = {name: PALETTE[idx % len(PALETTE)] for idx, (name, _) in enumerate(order)}
-    truncations: list[tuple[str, int, int]] = []
-    for name, points in order:
-        drawn = [
-            n
-            for n, p in points.items()
-            if p.get("accuracy") is not None or p.get("p50_ms") is not None
-        ]
-        if drawn and max(drawn) < ns[-1]:
-            last_n = max(drawn)
-            truncations.append((name, last_n, min(n for n in ns if n > last_n)))
-    boundaries = {n for _, last, miss in truncations for n in (last, miss)}
-
-    def choose_ticks(left: float, width: float) -> set[int]:
-        """Ticks whose labels clear each other; gridlines stay for every N."""
-
-        def priority(n: int) -> int:
-            if n in (ns[0], ns[-1]):
-                return 100
-            if n in boundaries:
-                return 80
-            if n & (n - 1) == 0:
-                return 50  # powers of two
-            return 10
-
-        chosen: list[int] = []
-        for n in sorted(ns, key=lambda v: (-priority(v), v)):
-            x = x_of(n, left, width)
-            if all(abs(x - x_of(c, left, width)) >= 22.0 for c in chosen):
-                chosen.append(n)
-        return set(chosen)
-
-    w, pad = 720.0, 46.0
-    panel_w = (w - 2 * pad - 30) / 2
-    top, height = 40.0, 230.0
-    legend_cols = 2 if len(order) > 8 else 1
-    legend_rows = math.ceil(len(order) / legend_cols)
-    legend_top = top + height + 34.0
-    h = legend_top + legend_rows * 16.0 + 10.0
-    out = [
-        f"<svg xmlns='http://www.w3.org/2000/svg' width='{w:.0f}' height='{h:.0f}' "
-        f"viewBox='0 0 {w:.0f} {h:.0f}' font-family='monospace' font-size='11'>",
-        "<rect width='100%' height='100%' fill='#fff'/>",
-        f"<text x='{pad}' y='20'>{html.escape(title)}</text>",
+    latency_values = [
+        p["p50_ms"]
+        for name, points in series.items()
+        if not name.startswith("baseline:")
+        for p in points.values()
+        if p.get("p50_ms") is not None and p["p50_ms"] > 0
     ]
-    for panel, (key, label, y_fmt) in enumerate(
-        (
-            ("accuracy", "accuracy", lambda v: f"{v:.2f}"),
-            ("p50_ms", "p50 latency (ms)", lambda v: f"{v:,.0f}"),
-        )
-    ):
-        left = pad + panel * (panel_w + 30)
-        out.append(
-            f"<text x='{left}' y='36'>{label}</text>"
-            f" <rect x='{left}' y='{top}' width='{panel_w}' height='{height}' "
-            f"fill='#f8f8f8' stroke='#ccc'/>"
-        )
-        # x gridlines for every N; labels only on ticks that clear each other
-        labeled = choose_ticks(left, panel_w)
-        for n in ns:
-            x = x_of(n, left, panel_w)
-            tick = (
-                (f"<text x='{x:.1f}' y='{top + height + 14}' text-anchor='middle'>{n}</text>")
-                if n in labeled
-                else ""
-            )
-            out.append(
-                f"<line x1='{x:.1f}' y1='{top}' x2='{x:.1f}' y2='{top + height}' "
-                f"stroke='#e4e4e4'/>{tick}"
-            )
-        all_y = [
-            p[key] for points in series.values() for p in points.values() if p.get(key) is not None
-        ]
-        if panel == 0:
-            y_lo, y_hi = 0.0, 1.0
+    latency_lo = min(latency_values) if latency_values else 1.0
+    latency_hi = max(latency_values) if latency_values else 10.0
+    if latency_hi <= latency_lo:
+        latency_lo *= 0.8
+        latency_hi *= 1.2
+    log_lo, log_hi = math.log10(latency_lo), math.log10(latency_hi)
+
+    width, pad = 1100.0, 36.0
+    chart_width, chart_height = 330.0, 54.0
+    panel_lefts = (258.0, 702.0)
+    first_row, row_height = 84.0, 82.0
+    height = first_row + len(order) * row_height + 40.0
+
+    def x_of(n: int, left: float) -> float:
+        if ns[0] == ns[-1]:
+            return left + chart_width / 2
+        fraction = math.log2(n / ns[0]) / math.log2(ns[-1] / ns[0])
+        return left + fraction * chart_width
+
+    def y_of(value: float, key: str, top: float) -> float:
+        if key == "accuracy":
+            fraction = max(0.0, min(1.0, value))
         else:
-            y_hi = max(all_y) if all_y else 1.0
-            y_lo = min(all_y) if all_y else 0.0
-            if y_hi <= y_lo:
-                y_hi = y_lo + 1.0
+            fraction = (math.log10(max(value, latency_lo)) - log_lo) / (log_hi - log_lo)
+        return top + chart_height * (1 - fraction)
 
-        def y_of(v: float, top=top, height=height, y_lo=y_lo, y_hi=y_hi):
-            return top + height - (v - y_lo) / (y_hi - y_lo) * height
+    # Retain the cutoff label when adjacent option counts cannot both fit.
+    ticks: list[int] = []
+    def priority(n: int) -> tuple[bool, bool, bool]:
+        return (n in (ns[0], ns[-1]), n == 255, n & (n - 1) == 0)
 
-        # y gridlines: 5 ticks
-        for i in range(6):
-            v = y_lo + (y_hi - y_lo) * i / 5
-            y = y_of(v)
+    for n in sorted(ns, key=lambda n: (priority(n), -n), reverse=True):
+        if all(abs(x_of(n, 0) - x_of(other, 0)) >= 26 for other in ticks):
+            ticks.append(n)
+    ticks.sort()
+
+    out = [
+        f"<svg xmlns='http://www.w3.org/2000/svg' width='{width:.0f}' height='{height:.0f}' "
+        f"viewBox='0 0 {width:.0f} {height:.0f}' role='img' "
+        f"aria-label='{html.escape(title, quote=True)}' font-family='sans-serif' font-size='12'>",
+        "<rect width='100%' height='100%' fill='#fff'/>",
+        f"<title>{html.escape(title)}</title>",
+        f"<text x='{pad}' y='26' font-size='16' font-weight='600'>{html.escape(title)}</text>",
+        f"<text x='{panel_lefts[0]}' y='57' font-weight='600'>Accuracy (0–100%)</text>",
+        f"<text x='{panel_lefts[1]}' y='57' font-weight='600'>"
+        "Median latency (ms, log scale)</text>",
+    ]
+    for row, (name, points) in enumerate(order):
+        top = first_row + row * row_height
+        valid_ns = sorted(
+            n for n, p in points.items()
+            if p.get("accuracy") is not None or p.get("p50_ms") is not None
+        )
+        cutoff = max(valid_ns) if valid_ns and max(valid_ns) < ns[-1] else None
+        model_latency = sorted(
+            p["p50_ms"] for p in points.values() if p.get("p50_ms") is not None
+        )
+        if not valid_ns:
+            detail = "no valid S3 decisions"
+        elif name.startswith("baseline:"):
+            detail = "local baseline"
+        elif model_latency:
+            low, high = model_latency[0], model_latency[-1]
+            detail = f"{low:,.0f}–{high:,.0f} ms"
+        else:
+            detail = "latency unavailable"
+        if cutoff is not None:
+            detail += f" · ends at N={cutoff}"
+        out.append(
+            f"<rect x='{pad - 8}' y='{top - 10:.0f}' width='{width - 2 * pad + 16:.0f}' "
+            f"height='{row_height - 4:.0f}' fill='{'#f7f9fc' if row % 2 == 0 else '#fff'}'/>"
+        )
+        out.append(
+            f"<text x='{pad}' y='{top + 23:.0f}' font-weight='600'>{html.escape(name)}</text>"
+        )
+        out.append(
+            f"<text x='{pad}' y='{top + 41:.0f}' fill='#555'>{html.escape(detail)}</text>"
+        )
+        for key, left, color in (
+            ("accuracy", panel_lefts[0], "#174a84"),
+            ("p50_ms", panel_lefts[1], "#a13a16"),
+        ):
             out.append(
-                f"<line x1='{left}' y1='{y:.1f}' x2='{left + panel_w}' y2='{y:.1f}' "
-                f"stroke='#e4e4e4'/>"
-                f"<text x='{left - 6}' y='{y + 4:.1f}' text-anchor='end'>{y_fmt(v)}</text>"
+                f"<rect x='{left}' y='{top}' width='{chart_width}' height='{chart_height}' "
+                "fill='white' stroke='#bcc5cf'/>"
             )
-        for name, points in order:
-            color = colors[name]
+            for n in ticks:
+                x = x_of(n, left)
+                out.append(
+                    f"<line x1='{x:.1f}' y1='{top}' x2='{x:.1f}' "
+                    f"y2='{top + chart_height}' stroke='#e9edf2'/>"
+                )
+            if key == "accuracy":
+                levels = (0.5, 1.0)
+            else:
+                levels = [10.0**p for p in range(
+                    math.ceil(log_lo), math.floor(log_hi) + 1
+                )]
+            for level in levels:
+                y = y_of(level, key, top)
+                out.append(
+                    f"<line x1='{left}' y1='{y:.1f}' x2='{left + chart_width}' "
+                    f"y2='{y:.1f}' stroke='#e9edf2'/>"
+                )
             coords = [
-                (x_of(n, left, panel_w), y_of(points[n][key]))
+                (x_of(n, left), y_of(points[n][key], key, top))
                 for n in ns
                 if n in points and points[n].get(key) is not None
+                and (key != "p50_ms" or points[n][key] > 0)
+                and (key != "p50_ms" or not name.startswith("baseline:"))
             ]
             if len(coords) >= 2:
-                out.append(_polyline(coords, color))
+                out.append(_polyline(coords, color, 2.5))
+            for x, y in coords:
                 out.append(
-                    f"<circle cx='{coords[-1][0]:.1f}' cy='{coords[-1][1]:.1f}' "
-                    f"r='2.5' fill='{color}'/>"
+                    f"<circle cx='{x:.1f}' cy='{y:.1f}' r='3' fill='white' "
+                    f"stroke='{color}' stroke-width='2'/>"
                 )
-        for name, _last, first_missing in truncations:
-            x = x_of(first_missing, left, panel_w)
-            out.append(
-                f"<line x1='{x:.1f}' y1='{top}' x2='{x:.1f}' y2='{top + height}' "
-                f"stroke='{colors[name]}' stroke-width='1.5' "
-                f"stroke-dasharray='3 3' opacity='0.85'/>"
-            )
-    legend_last = {name: last for name, last, _ in truncations}
-    col_w = (w - 2 * pad) / legend_cols
-    for i, (name, _) in enumerate(order):
-        col, row = i % legend_cols, i // legend_cols
-        x, y = pad + col * col_w, legend_top + row * 16.0
-        text = name + (f" (ends at N={legend_last[name]})" if name in legend_last else "")
-        out.append(
-            f"<line x1='{x:.1f}' y1='{y - 3.5:.1f}' x2='{x + 14:.1f}' "
-            f"y2='{y - 3.5:.1f}' stroke='{colors[name]}' stroke-width='3' "
-            f"stroke-linecap='round'/>"
-            f"<text x='{x + 20:.1f}' y='{y:.1f}'>{html.escape(text)}</text>"
-        )
+            if cutoff is not None and any(n > cutoff for n in ns):
+                x = x_of(min(n for n in ns if n > cutoff), left)
+                out.append(
+                    f"<line x1='{x:.1f}' y1='{top}' x2='{x:.1f}' "
+                    f"y2='{top + chart_height}' stroke='#555' "
+                    "stroke-width='1.5' stroke-dasharray='3 3'/>"
+                )
+        if row == len(order) - 1:
+            for left in panel_lefts:
+                for n in ticks:
+                    x = x_of(n, left)
+                    out.append(
+                        f"<text x='{x:.1f}' y='{top + chart_height + 16:.0f}' "
+                        f"text-anchor='middle' fill='#475569'>{n}</text>"
+                    )
+    out.append(
+        f"<text x='{width / 2:.0f}' y='{height - 7:.0f}' "
+        "text-anchor='middle' fill='#475569'>Number of options (log scale)</text>"
+    )
     out.append("</svg>")
     return "".join(out)
 

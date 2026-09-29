@@ -611,8 +611,8 @@ def test_reliability_and_cardinality_svg_shape():
     assert "polyline" in curve
 
 
-def test_cardinality_svg_legend_ticks_and_cutoff():
-    """The figure names its lines, thins crowded ticks, marks the cutoff."""
+def test_cardinality_svg_rows_ticks_and_cutoff():
+    """Separate model rows keep overlapping curves readable and show cutoffs."""
     full = (2, 8, 32, 64, 128, 192, 254, 255, 256, 384, 512)
     series = {
         "a:full": {n: {"accuracy": 1.0, "p50_ms": 10.0} for n in full},
@@ -624,9 +624,11 @@ def test_cardinality_svg_legend_ticks_and_cutoff():
         },
     }
     svg = cardinality_svg(series)
-    # Legend: every line is named; a truncated one says where it ends.
+    # Each model has its own labeled row, even when both have 100% accuracy.
     assert ">a:full<" in svg
-    assert "b:capped (ends at N=255)" in svg
+    assert ">b:capped<" in svg
+    assert "ends at N=255<" in svg
+    assert svg.count("<rect x='28.0' y=") == 2
     # Dashed rule at the first N the truncated contender does not answer.
     assert svg.count("stroke-dasharray='3 3'") == 2  # one per panel
     # Crowded ticks: 255 (last answered N) keeps its label; the labels it
