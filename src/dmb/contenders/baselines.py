@@ -105,6 +105,9 @@ PRIOR_SOURCES: dict[str, str] = {
     "s2_spam": "s2_spam",
     "s4_order": "s1_intent77",
 }
+for _family in ("s6_banking77", "s7_clinc150", "s8_nlupp"):
+    for _split in ("validation", "test"):
+        PRIOR_SOURCES[f"{_family}_{_split}"] = f"{_family}_validation"
 
 
 def build_majority_table(

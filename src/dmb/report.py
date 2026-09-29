@@ -35,6 +35,7 @@ from pathlib import Path
 import numpy as np
 
 from .contenders.jsonmode import usage_details as extract_usage_details
+from .expanded_metrics import task_metrics
 from .metrics import (
     accuracy,
     brier,
@@ -47,7 +48,8 @@ from .metrics import (
     score_risk_coverage,
 )
 from .prices import PRICES, Price, load_snapshot, prices_table_hash, snapshot_hash
-from .suites.build import SUITE_IDS, SUITE_ORDER
+from .suites.build import ALL_SUITE_ORDER as SUITE_ORDER
+from .suites.build import SUITE_IDS
 from .suites.items import DecisionItem, load_items, sha256_file
 
 SUITE_TITLES: dict[str, str] = {
@@ -57,9 +59,18 @@ SUITE_TITLES: dict[str, str] = {
     "s4_order": "S4 order stability",
     "s5_confidence": "S5 forced uncertainty (score diagnostics)",
 }
+for _family, _label in (
+    ("s6_banking77", "S6 Banking77 official split"),
+    ("s7_clinc150", "S7 CLINC150 with out-of-scope"),
+    ("s8_nlupp", "S8 NLU++ binary intent questions"),
+):
+    for _split in ("validation", "test"):
+        SUITE_TITLES[f"{_family}_{_split}"] = f"{_label} ({_split})"
 
 # Suites whose option texts are stable classes across items.
-LABEL_SUITES = frozenset({"s1_intent77", "s2_spam", "s4_order"})
+LABEL_SUITES = frozenset({"s1_intent77", "s2_spam", "s4_order"}) | frozenset(
+    key for key in SUITE_ORDER if key.startswith(("s6_", "s7_", "s8_"))
+)
 
 # Protocol fields that must agree before runs can be combined. Missing
 # values fall back to the historical (v1) behavior.
@@ -480,9 +491,15 @@ class CellMetrics:
     admits_ignorance: float | None = None
     mean_conf_no_good: float | None = None
     uncertainty_subsets: dict = field(default_factory=dict)
+    expanded: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {
+            **{key: self.expanded.get(key) for key in (
+                "success_all_requested", "out_of_scope_precision", "out_of_scope_recall",
+                "in_scope_success", "micro_intent_f1", "macro_intent_f1",
+                "complete_message_accuracy", "complete_message_coverage", "expected_messages",
+            )},
             "contender": self.contender,
             "suite": self.suite,
             "source_run": self.source_run,
@@ -804,6 +821,17 @@ def aggregate_cell(
         [r["correct"] if r["gold_index"] >= 0 else False for r in ok_rows],
         cell.expected_decisions,
     )
+
+    if suite_id.startswith(("s6_", "s7_", "s8_")):
+        expected_items = items
+        repeats = max(1, len({r["repeat"] for r in rows}))
+        if selected:
+            protocol = _protocol_of(selected.run.manifest)
+            repeats = protocol.get("repeats", 1)
+            limit = protocol.get("item_limit")
+            if limit is not None:
+                expected_items = dict(list(items.items())[:limit])
+        cell.expanded = task_metrics(rows, expected_items, repeats)
 
     return cell
 
@@ -1649,6 +1677,24 @@ KNOWN_METRIC_KEYS = set(CellMetrics(contender="", suite="").as_dict()) | _COMPUT
 def _table_specs() -> list[TableSpec]:
     pct = _fmt_pct
     return [
+        *[
+            TableSpec(title, key, pct, suites=frozenset(
+                suite for suite in SUITE_ORDER if suite.startswith(prefix)
+            ))
+            for title, key, prefix in (
+                ("S6–S8 correct decisions / all requested (%)", "success_all_requested",
+                 ("s6_", "s7_", "s8_")),
+                ("S7 out-of-scope precision (%)", "out_of_scope_precision", "s7_"),
+                ("S7 out-of-scope recall (all requested positives, %)",
+                 "out_of_scope_recall", "s7_"),
+                ("S7 in-scope correct / all requested in-scope (%)", "in_scope_success", "s7_"),
+                ("S8 micro intent F1 (%)", "micro_intent_f1", "s8_"),
+                ("S8 macro intent F1 (absent intents count as zero, %)", "macro_intent_f1", "s8_"),
+                ("S8 complete-message accuracy (all labels correct, %)",
+                 "complete_message_accuracy", "s8_"),
+                ("S8 complete-message valid coverage (%)", "complete_message_coverage", "s8_"),
+            )
+        ],
         TableSpec(
             "Accuracy (percent, valid rows, gold items)",
             "accuracy",
@@ -2223,7 +2269,8 @@ def render_md(model: ReportModel, json_path: Path | None = None) -> str:
     for title, header, rows in [*_metric_tables(model), *_analysis_tables(model)]:
         lines += [f"## {title}", "", _md_table(header, rows), ""]
 
-    lines += ["## Cardinality (S3)", "", "![cardinality](cardinality.svg)", ""]
+    if model.cardinality:
+        lines += ["## Cardinality (S3)", "", "![cardinality](cardinality.svg)", ""]
     lines += ["## Reliability diagrams", ""]
     for contender in model.contenders:
         lines += [
@@ -2248,6 +2295,20 @@ def render_md(model: ReportModel, json_path: Path | None = None) -> str:
         "  from seed 20260918.",
         "",
     ]
+    if any(s.startswith(("s6_", "s7_", "s8_")) for s in model.suites):
+        lines += [
+            "- S6 Banking77 and S8 NLU++: PolyAI, CC BY 4.0.",
+            "  https://github.com/PolyAI-LDN/task-specific-datasets",
+            "- S7 CLINC150: Larson et al. (2019), CC BY 3.0.",
+            "  https://github.com/clinc/oos-eval",
+            "- S8 adapts the intent task into binary Choice requests. Complete-message",
+            "  accuracy requires all intent decisions, including absent intents, to be correct.",
+            "  Missing answers count against coverage and complete-message accuracy.",
+            "  Micro/macro intent F1 count missing positive labels as missed positives.",
+            "  A limit that cuts a message cannot produce a complete answer for that message.",
+            "- S8 latency is per binary request; native Noul and batched questions are not tested.",
+            "  The validation/test fold selection differs from published NLU++ evaluations.",
+        ]
     return "\n".join(lines) + "\n"
 
 
@@ -2311,8 +2372,9 @@ def render_html(model: ReportModel, tables: list[Table]) -> str:
     for title, header, rows in [*tables, *_analysis_tables(model)]:
         parts.append(f"<h2>{html.escape(title)}</h2>")
         parts.append(_html_table(header, rows))
-    parts.append("<h2>Cardinality (S3)</h2>")
-    parts.append(cardinality_svg(model.cardinality))
+    if model.cardinality:
+        parts.append("<h2>Cardinality (S3)</h2>")
+        parts.append(cardinality_svg(model.cardinality))
     parts.append("<h2>Reliability diagrams</h2>")
     for contender in model.contenders:
         parts.append(f"<h3>{html.escape(contender)}</h3>")
@@ -2327,6 +2389,18 @@ def render_html(model: ReportModel, tables: list[Table]) -> str:
         "<li>S3 and S5 are synthetic, generated by this repository from seed 20260918.</li>",
     ]
     parts.append("</ul>")
+    if any(s.startswith(("s6_", "s7_", "s8_")) for s in model.suites):
+        parts.append(
+            "<p>S6 Banking77 and S8 NLU++: PolyAI, CC BY 4.0 "
+            "(https://github.com/PolyAI-LDN/task-specific-datasets). "
+            "S7 CLINC150: Larson et al. (2019), CC BY 3.0 "
+            "(https://github.com/clinc/oos-eval). "
+            "S8 is an adapted intent task with one binary Choice per label. "
+            "Complete-message accuracy requires every label to be correct; missing answers "
+            "count against it. Intent F1 counts missing positives as missed positives. "
+            "Latency is per binary request. Native Noul and batched questions are not tested. "
+            "The fold selection differs from published NLU++ evaluations.</p>"
+        )
     parts.append("</body></html>")
     return "".join(parts)
 

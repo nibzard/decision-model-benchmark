@@ -113,7 +113,11 @@ def test_conflicting_priors_for_one_option_set_rejected():
 
 
 def test_prior_sources_mapping_is_explicit_for_every_label_suite():
-    assert set(PRIOR_SOURCES) == {"s1_intent77", "s2_spam", "s4_order"}
+    from dmb.report import LABEL_SUITES
+
+    assert set(PRIOR_SOURCES) == LABEL_SUITES
+    for family in ("s6_banking77", "s7_clinc150", "s8_nlupp"):
+        assert PRIOR_SOURCES[f"{family}_test"] == f"{family}_validation"
     assert PRIOR_SOURCES["s4_order"] == "s1_intent77"
 
 

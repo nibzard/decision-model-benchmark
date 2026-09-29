@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 
 from . import s1_intent77, s2_spam, s3_cardinality, s4_order, s5_confidence
+from .expanded import EXPANDED_SUITES
 from .items import DecisionItem, save_items
 from .sources import SOURCES
 
@@ -28,6 +29,8 @@ SUITE_IDS = {
     "s4_order": s4_order.SUITE_ID,
     "s5_confidence": s5_confidence.SUITE_ID,
 }
+ALL_SUITE_ORDER = [*SUITE_ORDER, *EXPANDED_SUITES]
+SUITE_IDS.update({key: key for key in EXPANDED_SUITES})
 
 LICENSES_MD = """# Suite data licenses and attribution
 

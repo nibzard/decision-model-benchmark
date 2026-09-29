@@ -32,7 +32,7 @@ from .runner import (
     run_grid,
     validate_spec,
 )
-from .suites.build import SUITE_ORDER
+from .suites.build import ALL_SUITE_ORDER, SUITE_ORDER
 from .suites.items import load_items, sha256_file
 
 
@@ -40,10 +40,14 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def cmd_build(_args: argparse.Namespace) -> int:
+def cmd_build(args: argparse.Namespace) -> int:
     from .suites.build import build_all
+    from .suites.expanded import build_expanded
 
-    build_all(_repo_root())
+    if args.expanded:
+        build_expanded(_repo_root())
+    else:
+        build_all(_repo_root())
     return 0
 
 
@@ -87,7 +91,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
     try:
         validate_spec(spec, require_contenders=False)
-        unknown = set(suites) - set(SUITE_ORDER)
+        unknown = set(suites) - set(ALL_SUITE_ORDER)
         if unknown:
             raise RunConfigurationError(f"unknown suites: {', '.join(sorted(unknown))}")
         if args.only_jev and args.contenders is not None:
@@ -177,11 +181,31 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_thresholds(args: argparse.Namespace) -> int:
+    from .thresholds import evaluate_thresholds, fit_thresholds, write_result
+
+    try:
+        if args.command == "fit-thresholds":
+            result = fit_thresholds(
+                Path(args.run_dir), _repo_root(), args.max_error, args.min_accepted
+            )
+        else:
+            frozen = json.loads(Path(args.thresholds).read_text())
+            result = evaluate_thresholds(Path(args.run_dir), _repo_root(), frozen)
+        write_result(Path(args.out), result)
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"cannot analyze thresholds: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    print(f"wrote {args.out}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="dmb")
     sub = parser.add_subparsers(dest="command", required=True)
 
     build = sub.add_parser("build", help="build and hash all suite item files")
+    build.add_argument("--expanded", action="store_true", help="build S6–S8 validation/test suites")
     build.set_defaults(func=cmd_build)
 
     run = sub.add_parser("run", help="run a contender x suite grid")
@@ -226,6 +250,19 @@ def main(argv: list[str] | None = None) -> int:
         help="path to a Markdown note included verbatim in the report",
     )
     report.set_defaults(func=cmd_report)
+
+    fit = sub.add_parser("fit-thresholds", help="fit score thresholds using validation runs only")
+    fit.add_argument("run_dir")
+    fit.add_argument("--max-error", type=float, default=0.05)
+    fit.add_argument("--min-accepted", type=int, default=100)
+    fit.add_argument("--out", required=True, help="new JSON file; existing files are refused")
+    fit.set_defaults(func=cmd_thresholds)
+
+    evaluate = sub.add_parser("evaluate-thresholds", help="apply frozen thresholds to test runs")
+    evaluate.add_argument("run_dir")
+    evaluate.add_argument("--thresholds", required=True)
+    evaluate.add_argument("--out", required=True)
+    evaluate.set_defaults(func=cmd_thresholds)
 
     args = parser.parse_args(argv)
     try:

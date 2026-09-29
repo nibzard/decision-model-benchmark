@@ -200,6 +200,19 @@ This is a single-decision benchmark. It does not evaluate prose quality, agent
 workflows, tool use, or fine-tuning. [SPEC.md](SPEC.md) defines the suites,
 metrics, contenders, and execution rules.
 
+### Expanded suites
+
+Optional suites add Banking77's full official test set, CLINC150 with
+out-of-scope queries, and NLU++ with multiple intent labels per message.
+Each has separate validation and test files. Build them with
+`uv run dmb build --expanded`.
+
+The [expanded benchmark guide](docs/expanded-benchmarks.md) gives suite names,
+sample counts, local smoke commands, and threshold evaluation steps. Reports
+include out-of-scope detection and complete-message accuracy. NLU++ uses one
+binary Choice request per intent; native Noul and batched requests are not
+measured. These suites have no published model results yet.
+
 ## Get started without paid calls
 
 Install Python 3.12 and `uv`, then run:

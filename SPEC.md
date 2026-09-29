@@ -136,6 +136,39 @@ prevent cross-model honesty conclusions or deployment-threshold claims.
 
 ## Metrics
 
+### Optional S6–S8 evaluation suites
+
+`dmb build --expanded` creates six additional files, with separate validation
+and test suites for each family. The original five suite files and default
+run selection are unchanged.
+
+- S6 Banking77: the complete official test split; ten training examples per
+  intent form a deterministic validation sample after excluding test texts.
+- S7 CLINC150: official validation and test splits with an explicit
+  out-of-scope option alongside the 150 supported intents.
+- S8 NLU++: folds 16–17 for validation and 18–19 for test, in both domains.
+  Each message becomes one binary Choice decision for every applicable
+  intent. The original text hash and group ID link the questions. This
+  adapted task does not evaluate slots or native multiple-question requests.
+
+Validation and test text hashes must be disjoint after whitespace and case
+normalization. Test records are retained; overlapping validation messages
+are removed. Source commits and byte hashes are pinned. The existing v3
+Choice prompt and adapter behavior remain unchanged.
+
+Expanded metrics include correct answers over all requested decisions,
+out-of-scope precision/recall, intent F1, and complete-message accuracy.
+NLU++ requires all intent decisions to succeed for a correct complete message.
+
+`fit-thresholds` uses completed validation runs only, with one repeat.
+`evaluate-thresholds` uses frozen thresholds on separate test runs with the
+same configuration. Selection is empirical and does not guarantee a test
+error bound. Jev confidence remains a native score. See
+[the expanded benchmark guide](docs/expanded-benchmarks.md) for denominators,
+source licenses, split definitions, commands and limitations.
+
+### Reported measures
+
 Per contender, per suite:
 
 | Metric | Definition |

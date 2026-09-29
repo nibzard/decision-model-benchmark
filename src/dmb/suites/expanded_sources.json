@@ -1,0 +1,72 @@
+{
+  "banking77-test.csv": {
+    "commit": "57ec275d8078af65b7731c2a98be812d844a6d6b",
+    "sha256": "d12d6e3bc4c3103966ae786dc435913c0c563dfa328f5a3646d0e62cfeeb474d",
+    "url": "https://raw.githubusercontent.com/PolyAI-LDN/task-specific-datasets/57ec275d8078af65b7731c2a98be812d844a6d6b/banking_data/test.csv"
+  },
+  "banking77-train.csv": {
+    "commit": "57ec275d8078af65b7731c2a98be812d844a6d6b",
+    "sha256": "b06e26ac675513959a63135f11b94ea7786ed02da65db93a5650d8838cbc664b",
+    "url": "https://raw.githubusercontent.com/PolyAI-LDN/task-specific-datasets/57ec275d8078af65b7731c2a98be812d844a6d6b/banking_data/train.csv"
+  },
+  "clinc-LICENSE": {
+    "commit": "828f8093932c8fe6ca7936c3d2e52903b1c523de",
+    "sha256": "e6bc9e9c474700b708f568bac9e5a8a9bcb2b1dad53442f5ba449fcb848b8e76",
+    "url": "https://raw.githubusercontent.com/clinc/oos-eval/828f8093932c8fe6ca7936c3d2e52903b1c523de/LICENSE"
+  },
+  "clinc150.json": {
+    "commit": "828f8093932c8fe6ca7936c3d2e52903b1c523de",
+    "sha256": "36923c3705a59e08fe9c3883d8bc2dd966ef93e22cb78ac41171782a698d56e0",
+    "url": "https://raw.githubusercontent.com/clinc/oos-eval/828f8093932c8fe6ca7936c3d2e52903b1c523de/data/data_full.json"
+  },
+  "nlupp-banking-16.json": {
+    "commit": "57ec275d8078af65b7731c2a98be812d844a6d6b",
+    "sha256": "29e3bce3fa74908b85ee8c595b17419ae8161414cd4eb682fc41a79abe93c2bc",
+    "url": "https://raw.githubusercontent.com/PolyAI-LDN/task-specific-datasets/57ec275d8078af65b7731c2a98be812d844a6d6b/nlupp/data/banking/fold16.json"
+  },
+  "nlupp-banking-17.json": {
+    "commit": "57ec275d8078af65b7731c2a98be812d844a6d6b",
+    "sha256": "4bf5dfe9d5114ef0300f970ed4c473eb7a9090900223a01af018e6a3e2a17bee",
+    "url": "https://raw.githubusercontent.com/PolyAI-LDN/task-specific-datasets/57ec275d8078af65b7731c2a98be812d844a6d6b/nlupp/data/banking/fold17.json"
+  },
+  "nlupp-banking-18.json": {
+    "commit": "57ec275d8078af65b7731c2a98be812d844a6d6b",
+    "sha256": "f4f514ae92501dbe009ef639f229558d966eb63066f6273327558b51b9fcf69a",
+    "url": "https://raw.githubusercontent.com/PolyAI-LDN/task-specific-datasets/57ec275d8078af65b7731c2a98be812d844a6d6b/nlupp/data/banking/fold18.json"
+  },
+  "nlupp-banking-19.json": {
+    "commit": "57ec275d8078af65b7731c2a98be812d844a6d6b",
+    "sha256": "c24f0fb42c4714d27f8639351c22df75e714e1e3e2451032d73452e4faa3942c",
+    "url": "https://raw.githubusercontent.com/PolyAI-LDN/task-specific-datasets/57ec275d8078af65b7731c2a98be812d844a6d6b/nlupp/data/banking/fold19.json"
+  },
+  "nlupp-hotels-16.json": {
+    "commit": "57ec275d8078af65b7731c2a98be812d844a6d6b",
+    "sha256": "dac95faf7ba946819714ec5e4e3014d0cf3e054634cc10f1ac9f7693a90280cb",
+    "url": "https://raw.githubusercontent.com/PolyAI-LDN/task-specific-datasets/57ec275d8078af65b7731c2a98be812d844a6d6b/nlupp/data/hotels/fold16.json"
+  },
+  "nlupp-hotels-17.json": {
+    "commit": "57ec275d8078af65b7731c2a98be812d844a6d6b",
+    "sha256": "3e0a95d9c8097d40d8919b5405938c0088a80926d262f03c9234fc93a20a5d33",
+    "url": "https://raw.githubusercontent.com/PolyAI-LDN/task-specific-datasets/57ec275d8078af65b7731c2a98be812d844a6d6b/nlupp/data/hotels/fold17.json"
+  },
+  "nlupp-hotels-18.json": {
+    "commit": "57ec275d8078af65b7731c2a98be812d844a6d6b",
+    "sha256": "1034017ae94f7eb50ecf2cfb4ef850c53e362506b69b02ee7c99f346eec16437",
+    "url": "https://raw.githubusercontent.com/PolyAI-LDN/task-specific-datasets/57ec275d8078af65b7731c2a98be812d844a6d6b/nlupp/data/hotels/fold18.json"
+  },
+  "nlupp-hotels-19.json": {
+    "commit": "57ec275d8078af65b7731c2a98be812d844a6d6b",
+    "sha256": "b0140eecf03dd9e6cb251c1a4b42edff2f4ea2c74079a9988777ee7181ebb3e7",
+    "url": "https://raw.githubusercontent.com/PolyAI-LDN/task-specific-datasets/57ec275d8078af65b7731c2a98be812d844a6d6b/nlupp/data/hotels/fold19.json"
+  },
+  "nlupp-ontology.json": {
+    "commit": "57ec275d8078af65b7731c2a98be812d844a6d6b",
+    "sha256": "58736607898d17f73e8afa4fa41ca455670756398f3fc91751c31b62327e38c5",
+    "url": "https://raw.githubusercontent.com/PolyAI-LDN/task-specific-datasets/57ec275d8078af65b7731c2a98be812d844a6d6b/nlupp/data/ontology.json"
+  },
+  "polyai-LICENSE": {
+    "commit": "57ec275d8078af65b7731c2a98be812d844a6d6b",
+    "sha256": "7e7170e3cebf88a9f60c7b8421418323c09304da1af4d5e90f4da1dc1c8a2661",
+    "url": "https://raw.githubusercontent.com/PolyAI-LDN/task-specific-datasets/57ec275d8078af65b7731c2a98be812d844a6d6b/LICENSE"
+  }
+}
