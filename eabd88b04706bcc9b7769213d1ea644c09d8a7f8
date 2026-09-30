@@ -1,0 +1,1 @@
+Prepare the Decisions API comparison using a frozen 256-item pilot. The control run completes 512 decisions under a shared USD 2 cap. Known spend is USD 0.03489273, with missing usage on 12 jev option-limit rejections. The API contract and pricing remain unverified. Sampler and publication tests pass, and published artifacts exclude all frozen SMS states.
