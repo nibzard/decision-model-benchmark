@@ -1,0 +1,30 @@
+# Context
+
+## Background
+Plan 002 (plans/002-decisions-api.md) added the OpenAI Decisions API
+as a typed-decision contender against Luna and jev, using the frozen
+256-item sample from the September 30 controls run.
+
+## Why This Way
+The render helpers were renamed to provider-neutral names instead of
+duplicating them, and the output stayed byte-identical. The prompt
+fingerprint (4aec9254...) is unchanged, so the Decisions run merges
+with the controls in one report without a protocol-mix flag.
+
+## Gotchas
+- The endpoint caps `choices` at 255; the 12 items with 256 or more
+  options get provider rejections and return no usage, so recorded
+  spend ($0.0187722) is an incomplete known subtotal.
+- Four S5 no-good items returned refusal answers; these count as
+  malformed, not wrong.
+- The guide does not document the usage object, so the adapter accepts
+  either field naming (input_tokens/output_tokens or
+  prompt_tokens/completion_tokens) and the accounting stop blocks
+  scored requests when usage stays unknown.
+- The contender is gated on OPENAI_API_KEY and never runs by default.
+
+## Related
+- Scored-run script: scripts/run_decisions_preview.py
+- Report: results/decisions-preview-comparison-2026-10-07
+- Remaining: expand to Banking77, CLINC150, and NLU++ suites; the
+  native multiple-question mode is a separate experiment.
