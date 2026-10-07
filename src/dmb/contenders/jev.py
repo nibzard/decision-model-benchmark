@@ -43,7 +43,7 @@ from .base import (
     negotiate_calls,
 )
 from .jsonmode import jev_usage, usage_details
-from .render import render_jev_instructions, render_jev_state
+from .render import render_choice_instructions, render_plain_state
 
 TIMEOUT = httpx.Timeout(120.0, connect=15.0)
 API_URL = "https://api.typesafe.ai/v1/systemone"
@@ -53,7 +53,7 @@ API_URL = "https://api.typesafe.ai/v1/systemone"
 # between contender classes. The provider's documented answer field is
 # named "confidence"; the provider does not document it as a probability
 # of correctness, so manifests label it "provider-defined confidence".
-INSTRUCTIONS = render_jev_instructions()
+INSTRUCTIONS = render_choice_instructions()
 
 
 class JevContender(Contender):
@@ -85,7 +85,7 @@ class JevContender(Contender):
     def _decide(self, state: str, options: list[str]) -> Decision:
         criteria = {option: option for option in options}
         body = {
-            "state": render_jev_state(state),
+            "state": render_plain_state(state),
             "model": self.model,
             "questions": {
                 "decision": {

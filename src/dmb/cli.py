@@ -4,6 +4,7 @@
     uv run dmb run --run-id smoke --smoke
     uv run dmb run --run-id v1
     uv run dmb run --run-id v1-jev --only-jev
+    uv run dmb run --run-id v1-decisions --only-decisions
     uv run dmb report runs/v1 --out results/v1
 
 Run exit codes: 0 complete; 2 usage error (bad run ID, no contenders);
@@ -96,6 +97,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             raise RunConfigurationError(f"unknown suites: {', '.join(sorted(unknown))}")
         if args.only_jev and args.contenders is not None:
             raise RunConfigurationError("--only-jev cannot be combined with --contenders")
+        if args.only_decisions and args.contenders is not None:
+            raise RunConfigurationError("--only-decisions cannot be combined with --contenders")
+        if args.only_jev and args.only_decisions:
+            raise RunConfigurationError("--only-jev and --only-decisions are mutually exclusive")
         wanted = (
             [word.strip() for word in args.contenders.split(",")]
             if args.contenders is not None
@@ -105,6 +110,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             raise RunConfigurationError("contender filters must not be empty")
         if args.only_jev:
             wanted = ["typesafe:jev"]
+        if args.only_decisions:
+            wanted = ["openai-decisions:gpt-6-luna"]
         if (_repo_root() / "runs" / spec.run_id).exists():
             raise RunIdError(f"run directory runs/{spec.run_id} already exists; use a new run ID")
         for suite in suites:
@@ -119,6 +126,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     # directory, checks pricing, and persists its initial manifest first.
     spec.contenders, skipped, _unused_usage = build_contenders(
         include_jev=args.include_jev or args.only_jev,
+        include_decisions=args.include_decisions or args.only_decisions,
         majority_table=majority_table,
         negotiate=False,
         wanted=wanted,
@@ -216,6 +224,8 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--item-limit", type=int, default=None)
     run.add_argument("--include-jev", action="store_true")
     run.add_argument("--only-jev", action="store_true")
+    run.add_argument("--include-decisions", action="store_true")
+    run.add_argument("--only-decisions", action="store_true")
     run.add_argument(
         "--contenders",
         help="comma-separated substrings; keep only matching contenders",

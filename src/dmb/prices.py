@@ -231,6 +231,19 @@ PRICES: tuple[Price, ...] = (
         "2026-09-18",
         "https://typesafe.ai (launch post claim)",
     ),
+    # Decisions API list price from the published guide: input tokens only,
+    # no cache-read, cache-write, or output charges. Regional premiums and
+    # long-context multipliers are not encoded here.
+    Price(
+        "openai-decisions:gpt-6-luna",
+        "gpt-6-luna",
+        0.10,
+        0.0,
+        "2026-10-07",
+        "https://developers.openai.com/api/docs/guides/decisions (input tokens only)",
+        cache_read_per_mtok=0.0,
+        cache_write_per_mtok=0.0,
+    ),
     # Deterministic baselines cost nothing.
     Price("baseline:random", "-", 0.0, 0.0, "2026-09-18", "n/a"),
     Price("baseline:majority", "-", 0.0, 0.0, "2026-09-18", "n/a"),

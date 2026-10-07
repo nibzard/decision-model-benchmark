@@ -13,6 +13,7 @@ from .llm_deepseek import deepseek_contender
 from .llm_gemini import GeminiContender
 from .llm_openai import openai_contender
 from .llm_zai import zai_contender
+from .openai_decisions import OpenAIDecisionsContender
 
 # (registry key, env var, factory)
 LLM_SPECS = [
@@ -52,6 +53,7 @@ LLM_SPECS = [
 
 def build_contenders(
     include_jev: bool = False,
+    include_decisions: bool = False,
     majority_table: dict[frozenset[str], tuple[str, float]] | None = None,
     negotiate: bool = True,
     wanted: list[str] | None = None,
@@ -61,7 +63,8 @@ def build_contenders(
     ``wanted`` is a list of substrings. Only registry keys matching at
     least one substring are considered - baselines included; unselected
     contenders are neither constructed nor negotiated, so filtering never
-    spends a provider call.
+    spends a provider call. ``include_jev`` and ``include_decisions`` opt
+    in to the two typed-decision contenders, which never run by default.
 
     Returns ``(contenders, skipped, negotiation_usage)`` where each skip
     carries a recorded reason (SPEC.md T2.5) and ``negotiation_usage``
@@ -108,6 +111,18 @@ def build_contenders(
             contenders.append(contender)
         else:
             skipped.append({"contender": "typesafe:jev", "reason": "env TYPESAFE_API_KEY not set"})
+    if include_decisions and selected("openai-decisions:gpt-6-luna"):
+        if os.environ.get("OPENAI_API_KEY"):
+            contender = OpenAIDecisionsContender()
+            if negotiate:
+                usage = contender.negotiate()
+                if usage:
+                    negotiation_usage[contender.name] = usage
+            contenders.append(contender)
+        else:
+            skipped.append(
+                {"contender": "openai-decisions:gpt-6-luna", "reason": "env OPENAI_API_KEY not set"}
+            )
     return contenders, skipped, negotiation_usage
 
 
@@ -115,6 +130,7 @@ __all__ = [
     "build_contenders",
     "build_majority_table",
     "JevContender",
+    "OpenAIDecisionsContender",
     "AnthropicContender",
     "cerebras_contender",
     "deepseek_contender",

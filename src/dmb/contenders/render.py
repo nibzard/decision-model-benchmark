@@ -6,10 +6,11 @@ output is pinned byte-for-byte by ``tests/test_render.py``; change the
 test only with a recorded protocol deviation.
 
 Semantic instructions (choice under uncertainty and the confidence
-definition) are shared between the language-model prompt and the jev
-question, so every contender receives the same meaning. Provider-specific
-formatting stays separate. Changing any shared string changes
-``prompt_fingerprint()`` and requires a new protocol version.
+definition) are shared between the language-model prompt and the
+typed-decision question (jev, OpenAI Decisions), so every contender
+receives the same meaning. Provider-specific formatting stays separate.
+Changing any shared string changes ``prompt_fingerprint()`` and requires
+a new protocol version.
 """
 
 from __future__ import annotations
@@ -70,8 +71,8 @@ def render_prompt(state: str, options: list[str]) -> str:
     )
 
 
-def render_jev_instructions() -> str:
-    """Question instructions for the jev adapter.
+def render_choice_instructions() -> str:
+    """Question instructions for typed-decision adapters.
 
     Provider-specific wrapper around the same shared semantics the
     language-model prompt carries, so the uncertainty requirement and the
@@ -85,8 +86,8 @@ def render_jev_instructions() -> str:
     )
 
 
-def render_jev_state(state: str) -> str:
-    """State text handed to the jev adapter (no JSON instructions there)."""
+def render_plain_state(state: str) -> str:
+    """State text handed to typed-decision adapters (no JSON instructions)."""
     return state.strip()
 
 
@@ -102,7 +103,7 @@ def prompt_fingerprint() -> str:
             render_state_block("{state}"),
             render_options_block(["{option}"]),
             render_task_block(),
-            render_jev_instructions(),
+            render_choice_instructions(),
         ]
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
